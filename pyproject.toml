@@ -1,0 +1,74 @@
+[build-system]
+requires = ["hatchling>=1.21"]
+build-backend = "hatchling.build"
+
+[project]
+name = "event-backtester"
+version = "0.1.0"
+description = "Event-driven backtesting engine for systematic trading strategies, built around correctness."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Houssam Mehdi" }]
+requires-python = ">=3.11"
+keywords = ["backtesting", "trading", "quant", "event-driven", "walk-forward", "momentum"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Financial and Insurance Industry",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Office/Business :: Financial :: Investment",
+    "Typing :: Typed",
+]
+dependencies = ["numpy>=1.26", "pandas>=2.1"]
+
+[project.optional-dependencies]
+plot = ["matplotlib>=3.8"]
+dev = [
+    "pytest>=8.0",
+    "hypothesis>=6.100",
+    "ruff>=0.6",
+    "mypy>=1.10",
+    "pandas-stubs>=2.1",
+]
+
+[project.scripts]
+backtest = "backtester.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/backtester"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src/backtester", "tests", "README.md", "LICENSE"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"
+filterwarnings = ["error"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "B", "UP", "SIM", "C4", "RUF", "N", "PT", "NPY", "PD", "D"]
+ignore = [
+    "D105",   # magic methods
+    "D107",   # __init__ is documented on the class
+]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["D"]
+"examples/**" = ["D103"]
+
+[tool.mypy]
+strict = true
+warn_unreachable = true
+files = ["src"]
