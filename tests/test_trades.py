@@ -5,7 +5,10 @@ import math
 import pandas as pd
 import pytest
 
+from backtester import BpsCommission, DataFeed, generate_ohlcv
 from backtester.analytics import round_trips
+from backtester.config import BacktestConfig
+from backtester.strategies import BollingerMeanReversion
 
 IDX = pd.bdate_range("2024-01-01", periods=10)
 
@@ -80,3 +83,13 @@ def test_open_trade_is_marked_at_last_price() -> None:
 
 def test_empty_fill_log() -> None:
     assert round_trips(fills(), PRICES).empty
+
+
+def test_trade_log_reconciles_with_portfolio_pnl() -> None:
+    feed = DataFeed(generate_ohlcv(3, 2, seed=4))
+    cfg = BacktestConfig(commission=BpsCommission(5))
+    result = cfg.run(feed, BollingerMeanReversion())
+    trades = result.trades()
+    assert (trades["status"] == "closed").sum() > 10
+    total = trades["net_pnl"].sum()
+    assert total == pytest.approx(result.final_equity - result.initial_cash, rel=1e-9)

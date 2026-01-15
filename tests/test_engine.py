@@ -2,22 +2,29 @@
 
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
 import pytest
 
 from backtester import (
+    BpsCommission,
     ConfigError,
     DataFeed,
     Engine,
+    FixedBpsSlippage,
     LookAheadError,
     MarketView,
     OrderStatus,
     OrderType,
     RiskLimits,
+    SimulatedBroker,
+    SquareRootImpactSlippage,
     Strategy,
     StrategyContext,
     TimeInForce,
 )
+from backtester.config import BacktestConfig
+from backtester.strategies import STRATEGIES
 from tests.conftest import Scripted, bars
 
 
@@ -77,6 +84,58 @@ def test_strategy_cannot_read_the_future() -> None:
         Engine(ramp_feed(), Peeker()).run()
 
 
+@pytest.mark.parametrize("name", sorted(STRATEGIES))
+def test_results_are_invariant_to_future_data(name: str, synthetic_feed: DataFeed) -> None:
+    """Truncating the data after bar k must not change anything up to bar k."""
+    cfg = BacktestConfig(slippage=FixedBpsSlippage(3), commission=BpsCommission(1))
+    full = cfg.run(synthetic_feed, STRATEGIES[name]())
+    k = 500
+    cut = cfg.run(synthetic_feed.slice(0, k + 1), STRATEGIES[name]())
+    pd.testing.assert_series_equal(full.equity.iloc[: k + 1], cut.equity)
+    early = full.fills[full.fills["timestamp"] <= synthetic_feed.index[k]]
+    pd.testing.assert_frame_equal(early.reset_index(drop=True), cut.fills)
+
+
+@pytest.mark.parametrize("name", sorted(STRATEGIES))
+def test_realistic_run_keeps_identities_with_missing_bars(name: str, gappy_feed: DataFeed) -> None:
+    cfg = BacktestConfig(
+        slippage=SquareRootImpactSlippage(eta=0.5, spread_bps=2),
+        commission=BpsCommission(1),
+        max_participation=0.05,
+        limits=RiskLimits(max_gross_leverage=1.5, max_position_weight=0.6),
+        borrow_rate=0.02,
+    )
+    result = cfg.run(gappy_feed, STRATEGIES[name](), check_invariants=True)
+    values = (result.positions * result.prices).sum(axis=1)
+    np.testing.assert_allclose(result.equity, result.cash + values, rtol=1e-10)
+    assert (result.exposure["gross"] / result.equity).max() < 1.5 * 1.1  # drift allowance
+    assert len(result.fills) > 0
+    assert result.metrics().n_bars == len(gappy_feed)
+
+
+def test_runs_are_deterministic(synthetic_feed: DataFeed) -> None:
+    a = BacktestConfig().run(synthetic_feed, STRATEGIES["xsmom"]())
+    b = BacktestConfig().run(synthetic_feed, STRATEGIES["xsmom"]())
+    pd.testing.assert_series_equal(a.equity, b.equity)
+
+
+def test_trading_window_and_warmup(synthetic_feed: DataFeed) -> None:
+    start, end = 300, 600
+    result = BacktestConfig().run(synthetic_feed, STRATEGIES["tsmom"](), start=start, end=end)
+    assert result.equity.index[0] == synthetic_feed.index[start]
+    assert result.equity.index[-1] == synthetic_feed.index[end]
+    assert result.equity.iloc[0] == result.initial_cash
+    assert result.fills["timestamp"].min() == synthetic_feed.index[start + 1]
+    # warm-up let the strategy trade immediately instead of waiting a year for history
+    by_ts = BacktestConfig().run(
+        synthetic_feed,
+        STRATEGIES["tsmom"](),
+        start=str(synthetic_feed.index[start].date()),
+        end=synthetic_feed.index[end],
+    )
+    pd.testing.assert_series_equal(result.equity, by_ts.equity)
+
+
 def test_engine_guards() -> None:
     feed = ramp_feed()
     engine = Engine(feed, Scripted({}))
@@ -104,3 +163,14 @@ def test_on_fill_hook_and_explicit_orders_with_risk() -> None:
     result = Engine(feed, strategy, initial_cash=10_000, risk=risk).run()
     assert fills == [49]  # 50% of 10k at the 100.5 close -> 49 shares
     assert any(a.kind == "clipped" for a in result.risk_log)
+
+
+def test_report_mentions_key_sections(synthetic_feed: DataFeed) -> None:
+    broker = SimulatedBroker(FixedBpsSlippage(2), BpsCommission(1), max_participation=0.1)
+    result = Engine(synthetic_feed, STRATEGIES["sma"](), broker=broker).run()
+    report = result.report()
+    for text in ("Sharpe ratio", "Max drawdown", "Beta", "Hit rate", "Commission"):
+        assert text in report
+    flat = result.metrics().as_dict()
+    assert "benchmark_beta" in flat
+    assert "trade_hit_rate" in flat
