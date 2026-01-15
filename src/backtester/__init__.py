@@ -29,6 +29,8 @@ from backtester.execution import (
     SquareRootImpactSlippage,
 )
 from backtester.orders import Order, OrderStatus, OrderType, Side, TimeInForce
+from backtester.portfolio import Portfolio, Position
+from backtester.risk import RiskLimits, RiskManager
 
 __version__ = "0.1.0"
 
@@ -56,6 +58,10 @@ __all__ = [
     "OrderStatus",
     "OrderType",
     "PerShareCommission",
+    "Portfolio",
+    "Position",
+    "RiskLimits",
+    "RiskManager",
     "Side",
     "SignalEvent",
     "SimulatedBroker",
