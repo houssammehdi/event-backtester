@@ -19,6 +19,15 @@ from backtester.events import (
     SignalEvent,
     TargetEvent,
 )
+from backtester.execution import (
+    BpsCommission,
+    FixedBpsSlippage,
+    NoCommission,
+    NoSlippage,
+    PerShareCommission,
+    SimulatedBroker,
+    SquareRootImpactSlippage,
+)
 from backtester.orders import Order, OrderStatus, OrderType, Side, TimeInForce
 
 __version__ = "0.1.0"
@@ -27,6 +36,7 @@ __all__ = [
     "AccountingError",
     "BacktesterError",
     "Bar",
+    "BpsCommission",
     "CancelEvent",
     "ConfigError",
     "DataError",
@@ -34,16 +44,22 @@ __all__ = [
     "Event",
     "EventQueue",
     "FillEvent",
+    "FixedBpsSlippage",
     "LookAheadError",
     "MarketEvent",
     "MarketView",
+    "NoCommission",
+    "NoSlippage",
     "Order",
     "OrderError",
     "OrderEvent",
     "OrderStatus",
     "OrderType",
+    "PerShareCommission",
     "Side",
     "SignalEvent",
+    "SimulatedBroker",
+    "SquareRootImpactSlippage",
     "TargetEvent",
     "TimeInForce",
     "__version__",
