@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 
 import pandas as pd
 import pytest
 
-from backtester import DataFeed, generate_ohlcv
+from backtester import DataFeed, MarketView, Strategy, StrategyContext, generate_ohlcv
 
 Row = tuple[float, float, float, float, float]
 
@@ -18,6 +18,22 @@ def bars(rows: Sequence[Row], start: str = "2024-01-01") -> pd.DataFrame:
 
 def flat_bars(n: int, price: float = 100.0, volume: float = 1e6) -> pd.DataFrame:
     return bars([(price, price, price, price, volume)] * n)
+
+
+class Scripted(Strategy):
+    """Runs ``actions[position](view, ctx)`` on the given bars; records every view seen."""
+
+    name = "scripted"
+
+    def __init__(self, actions: dict[int, Callable[[MarketView, StrategyContext], None]]) -> None:
+        self.actions = actions
+        self.seen: list[pd.Timestamp] = []
+
+    def on_bar(self, view: MarketView, ctx: StrategyContext) -> None:
+        self.seen.append(view.timestamp)
+        action = self.actions.get(view.position)
+        if action is not None:
+            action(view, ctx)
 
 
 @pytest.fixture(scope="session")
