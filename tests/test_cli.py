@@ -1,0 +1,113 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+from backtester.cli import main
+
+
+def test_run_prints_a_report(capsys: pytest.CaptureFixture[str]) -> None:
+    code = main(
+        [
+            "run",
+            "--strategy",
+            "tsmom",
+            "--symbols",
+            "3",
+            "--years",
+            "2",
+            "--seed",
+            "1",
+            "-p",
+            "lookback=63",
+            "--trades",
+            "3",
+        ]
+    )
+    out = capsys.readouterr().out
+    assert code == 0
+    for text in ("Strategy: tsmom", "lookback=63", "Sharpe ratio", "Buy & hold", "entry_time"):
+        assert text in out
+
+
+def test_walkforward_prints_windows_and_warning(capsys: pytest.CaptureFixture[str]) -> None:
+    code = main(
+        [
+            "walkforward",
+            "--strategy",
+            "sma",
+            "--symbols",
+            "2",
+            "--years",
+            "3",
+            "--seed",
+            "2",
+            "--train-bars",
+            "252",
+            "--test-bars",
+            "126",
+            "--warmup",
+            "100",
+            "-g",
+            "fast=5,10",
+            "-g",
+            "slow=40",
+        ]
+    )
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "Stitched out-of-sample" in out
+    assert "deflated Sharpe" in out
+    assert "fast=" in out
+
+
+def test_generate_then_run_from_csv(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    csv = tmp_path / "data.csv"
+    assert main(["generate", "--out", str(csv), "--symbols", "2", "--years", "1"]) == 0
+    assert csv.exists()
+    assert main(["run", "--strategy", "bollinger", "--csv", str(csv)]) == 0
+    assert "SYN" not in capsys.readouterr().err
+
+
+def test_strategies_listing(capsys: pytest.CaptureFixture[str]) -> None:
+    assert main(["strategies"]) == 0
+    out = capsys.readouterr().out
+    for name in ("sma", "tsmom", "xsmom", "bollinger"):
+        assert name in out
+
+
+def test_errors_exit_with_code_2(capsys: pytest.CaptureFixture[str]) -> None:
+    assert main(["run", "--years", "1", "-p", "nonsense=1"]) == 2
+    assert "unknown parameter" in capsys.readouterr().err
+    assert main(["run", "--years", "1", "-p", "novalue"]) == 2
+    assert main(["walkforward", "--years", "1", "-g", "bad=1"]) == 2
+
+
+def test_plot_option_writes_png(tmp_path: Path) -> None:
+    pytest.importorskip("matplotlib")
+    out = tmp_path / "equity.png"
+    assert main(["run", "--strategy", "sma", "--years", "2", "--plot", str(out)]) == 0
+    assert out.stat().st_size > 10_000
+    wf = tmp_path / "wf.png"
+    args = [
+        "walkforward",
+        "-s",
+        "sma",
+        "--years",
+        "3",
+        "--train-bars",
+        "252",
+        "--test-bars",
+        "252",
+        "--warmup",
+        "50",
+        "-g",
+        "fast=10",
+        "-g",
+        "slow=40",
+        "--plot",
+        str(wf),
+    ]
+    assert main(args) == 0
+    assert wf.exists()
