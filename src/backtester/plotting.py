@@ -34,9 +34,6 @@ def _money(value: float, _: object = None) -> str:
 
 def _pyplot() -> Any:
     try:
-        import matplotlib
-
-        matplotlib.use("Agg")
         import matplotlib.pyplot as plt
     except ImportError as exc:  # pragma: no cover - exercised only without the extra
         raise ImportError(

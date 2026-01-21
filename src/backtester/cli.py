@@ -198,7 +198,18 @@ def _describe_costs(cfg: BacktestConfig) -> str:
     )
 
 
+def _headless_plotting() -> None:
+    """Select the non-interactive backend: the CLI only ever writes PNG files."""
+    try:
+        import matplotlib
+    except ImportError as exc:
+        raise ConfigError("--plot needs matplotlib: pip install 'event-backtester[plot]'") from exc
+    matplotlib.use("Agg")
+
+
 def _cmd_run(args: argparse.Namespace) -> int:
+    if args.plot is not None:
+        _headless_plotting()
     feed = _load_feed(args)
     cfg = _config(args)
     strategy = _make_strategy(args.strategy, _parse_params(args.param))
@@ -219,6 +230,8 @@ def _cmd_run(args: argparse.Namespace) -> int:
 
 
 def _cmd_walkforward(args: argparse.Namespace) -> int:
+    if args.plot is not None:
+        _headless_plotting()
     feed = _load_feed(args)
     cfg = _config(args)
     grid = _parse_grid(args.grid) if args.grid else DEFAULT_GRIDS[args.strategy]
