@@ -248,9 +248,13 @@ class Engine:
                     self.portfolio.on_fill(event)
                     fills.append(event)
                     traded[i - self._start] += event.notional
-                    self.context._begin(ts)
-                    self.strategy.on_fill(event, self.context)
-                    self._push_all(self.context._drain())
+                    if not self.risk.halted:
+                        # A halted strategy is never called again, not even for the
+                        # kill switch's own fills: its intents could cancel the
+                        # flattening orders.
+                        self.context._begin(ts)
+                        self.strategy.on_fill(event, self.context)
+                        self._push_all(self.context._drain())
                 elif isinstance(event, MarketEvent):
                     self._on_market(view)
                     if i >= self._start:

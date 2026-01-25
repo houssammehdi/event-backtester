@@ -10,11 +10,13 @@ from backtester import (
     Engine,
     FillEvent,
     OrderEvent,
+    OrderStatus,
     Portfolio,
     RiskLimits,
     RiskManager,
     Side,
     SignalEvent,
+    SimulatedBroker,
     TargetEvent,
 )
 from tests.conftest import Scripted, bars
@@ -132,6 +134,40 @@ def test_drawdown_kill_switch_flattens_and_halts() -> None:
     assert result.positions["A"].iloc[-1] == 0
     assert np.isclose(result.equity.iloc[-1], result.equity.iloc[6])
     assert any(a.kind == "kill_switch" for a in result.risk_log)
+
+
+def test_halted_strategy_cannot_cancel_the_kill_switch_flattening() -> None:
+    """Regression: on_fill used to run for the kill switch's own fills after the halt.
+
+    With thin volume the flattening takes several bars. A strategy that cancels all
+    orders from on_fill (a common OCO emulation) cancelled the remaining flattening
+    order after its first partial fill, and the book stayed open for good.
+    """
+    prices = [100, 100, 100, 95, 88, 80, 75, 70, 72, 74, 76, 78, 80]
+    volumes = [1e6] * 3 + [1_000] * 10  # 10% participation: 100 shares per bar later on
+    rows = [(p, p * 1.01, p * 0.99, p, v) for p, v in zip(prices, volumes, strict=True)]
+    feed = DataFeed({"A": bars(rows)})
+    calls: list[pd.Timestamp] = []
+
+    class CancelOnFill(Scripted):
+        def on_fill(self, fill, ctx) -> None:  # type: ignore[no-untyped-def]
+            calls.append(fill.timestamp)
+            ctx.cancel()
+
+    strategy = CancelOnFill({0: lambda view, ctx: ctx.order("A", 250)})
+    result = Engine(
+        feed,
+        strategy,
+        initial_cash=30_000,
+        broker=SimulatedBroker(max_participation=0.1),
+        risk=RiskManager(RiskLimits(max_drawdown=0.15)),
+        check_invariants=True,
+    ).run()
+    assert result.halted_at == feed.index[5]
+    assert result.positions["A"].iloc[-1] == 0  # flattened over bars 6, 7 and 8
+    kill = [o for o in result.orders if o.tag == "kill_switch"]
+    assert [o.status for o in kill] == [OrderStatus.FILLED]
+    assert calls == [feed.index[1]]  # only the entry fill reached the strategy
 
 
 def test_engine_applies_gross_leverage_limit_to_targets() -> None:

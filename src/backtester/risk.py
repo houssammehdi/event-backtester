@@ -24,7 +24,8 @@ class RiskLimits:
         max_gross_leverage: Maximum ``sum(|position value|) / equity``.
         max_drawdown: Drawdown from the running equity peak (e.g. ``0.25``) that
             triggers the kill-switch: all orders are cancelled, every position is
-            flattened with market orders and the strategy is halted for good.
+            flattened with market orders and the strategy is halted for good (the
+            engine calls neither ``on_bar`` nor ``on_fill`` again).
         allow_short: Whether net short positions are permitted.
     """
 
