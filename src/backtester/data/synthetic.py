@@ -9,10 +9,11 @@ test runs offline and reproducibly:
 * Each symbol loads on the market factor with its own beta and adds an idiosyncratic
   component whose drift also switches regimes (source of cross-sectional dispersion).
 * **Jumps** arrive as a Poisson process and land overnight, producing opening gaps.
-* The daily log return is split into an overnight and an intraday part. High and low
-  are sampled exactly from the distribution of the maximum/minimum of a Brownian bridge
-  between open and close, so ``low <= min(open, close) <= max(open, close) <= high``
-  holds by construction.
+* The daily log return is split into an overnight and an intraday part. The high is
+  drawn exactly from the distribution of the maximum of a Brownian bridge between open
+  and close, and the low from that of its minimum, so
+  ``low <= min(open, close) <= max(open, close) <= high`` holds by construction. The
+  two are drawn independently: each marginal is exact, their joint law is not.
 """
 
 from __future__ import annotations
