@@ -184,7 +184,9 @@ class Engine:
         if self._start > self._end:
             raise ConfigError("start must not be after end")
         self._ids = itertools.count(1)
-        self.context = StrategyContext(self.portfolio, self.broker, self._next_id)
+        self.context = StrategyContext(
+            self.portfolio, self.broker, self._next_id, symbols=feed.symbols
+        )
         self._queue = EventQueue()
         self._view = feed.view(0)
         self._ran = False

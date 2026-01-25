@@ -14,8 +14,10 @@ from backtester import (
     FixedBpsSlippage,
     LookAheadError,
     MarketView,
+    OrderError,
     OrderStatus,
     OrderType,
+    Portfolio,
     RiskLimits,
     SimulatedBroker,
     SquareRootImpactSlippage,
@@ -31,6 +33,30 @@ from tests.conftest import Scripted, bars
 def ramp_feed(n: int = 6) -> DataFeed:
     rows = [(100 + i, 101 + i, 99 + i, 100.5 + i, 1e6) for i in range(n)]
     return DataFeed({"A": bars(rows)})
+
+
+@pytest.mark.parametrize(
+    "action",
+    [
+        lambda view, ctx: ctx.order("AA", 10),
+        lambda view, ctx: ctx.target_weights({"AA": 1.0}),
+        lambda view, ctx: ctx.target_weights({"A": 0.5, "AA": 0.5}, partial=True),
+        lambda view, ctx: ctx.cancel(symbol="AA"),
+    ],
+)
+def test_unknown_symbols_are_rejected_where_the_mistake_is_made(action) -> None:  # type: ignore[no-untyped-def]
+    """Regression: a mistyped target was silently dropped, and a mistyped order raised a
+    bare KeyError one bar later from inside the broker's matching loop."""
+    with pytest.raises(OrderError, match="unknown symbol 'AA'"):
+        Engine(ramp_feed(), Scripted({0: action})).run()
+
+
+def test_context_without_a_universe_accepts_any_symbol() -> None:
+    ctx = StrategyContext(Portfolio(1_000), SimulatedBroker())
+    ctx._begin(pd.Timestamp("2024-01-02"))
+    ctx.order("ANY", 1)
+    ctx.target_weights({"ANY": 1.0})
+    assert len(ctx._drain()) == 2
 
 
 def test_market_order_fills_next_open_and_accounting_is_exact() -> None:

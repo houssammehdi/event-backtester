@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import itertools
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import replace
 from typing import Any, ClassVar
 
 import pandas as pd
 
 from backtester.data.feed import DataFeed, MarketView
+from backtester.errors import OrderError
 from backtester.events import CancelEvent, Event, FillEvent, SignalEvent, TargetEvent
 from backtester.execution.broker import SimulatedBroker
 from backtester.orders import Order, OrderType, TimeInForce
@@ -25,6 +26,14 @@ class StrategyContext:
     :class:`~backtester.events.TargetEvent`, :class:`~backtester.events.SignalEvent` or
     :class:`~backtester.events.CancelEvent` - that the engine pushes through the event
     queue to the risk manager and broker after ``on_bar`` returns.
+
+    Args:
+        portfolio: The account the strategy trades.
+        broker: The broker holding the working orders.
+        next_id: Order-id generator shared with the engine.
+        symbols: The tradable universe. When given, action methods raise
+            :class:`~backtester.errors.OrderError` for any other symbol at the call
+            site, instead of the mistake surfacing (or vanishing) later.
     """
 
     def __init__(
@@ -32,13 +41,20 @@ class StrategyContext:
         portfolio: Portfolio,
         broker: SimulatedBroker,
         next_id: Callable[[], int] | None = None,
+        *,
+        symbols: Iterable[str] | None = None,
     ) -> None:
         self._portfolio = portfolio
         self._broker = broker
         self._next_id = next_id or itertools.count(1).__next__
+        self._universe: frozenset[str] | None = None if symbols is None else frozenset(symbols)
         self._events: list[Event] = []
         self._timestamp: pd.Timestamp | None = None
         self._muted = False
+
+    def _check_symbol(self, symbol: str) -> None:
+        if self._universe is not None and symbol not in self._universe:
+            raise OrderError(f"unknown symbol {symbol!r}: it is not in the data feed")
 
     # ------------------------------------------------------------------ engine hooks
     def _begin(self, timestamp: pd.Timestamp, *, muted: bool = False) -> None:
@@ -95,6 +111,8 @@ class StrategyContext:
         With ``partial=False`` symbols not listed are closed and every working order is
         cancelled; with ``partial=True`` only the listed symbols are touched.
         """
+        for symbol in weights:
+            self._check_symbol(symbol)
         self._events.append(TargetEvent(self.timestamp, weights=weights, partial=partial))
 
     def order(
@@ -109,6 +127,7 @@ class StrategyContext:
         tag: str = "",
     ) -> int:
         """Request an order for a signed ``quantity``; returns the order id."""
+        self._check_symbol(symbol)
         order_id = self._next_id()
         self._events.append(
             SignalEvent(
@@ -127,6 +146,8 @@ class StrategyContext:
 
     def cancel(self, order_id: int | None = None, *, symbol: str | None = None) -> None:
         """Cancel one order, all orders of ``symbol``, or (no arguments) all orders."""
+        if symbol is not None:
+            self._check_symbol(symbol)
         self._events.append(CancelEvent(self.timestamp, order_id=order_id, symbol=symbol))
 
 
