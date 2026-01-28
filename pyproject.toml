@@ -46,7 +46,9 @@ include = ["src/backtester", "tests", "README.md", "LICENSE"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-ra --strict-markers"
+# Large Monte Carlo studies are marked slow and skipped by default: run `pytest -m slow`.
+addopts = "-ra --strict-markers -m 'not slow'"
+markers = ["slow: large Monte Carlo simulations (deselected by default; run with -m slow)"]
 filterwarnings = ["error"]
 
 [tool.ruff]
