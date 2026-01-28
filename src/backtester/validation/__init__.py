@@ -11,6 +11,8 @@ quantifies how much of its performance could be luck:
   selection.
 * **Probability of backtest overfitting** (:mod:`~backtester.validation.pbo`) -
   combinatorially symmetric cross-validation of a parameter search.
+* **Data-snooping tests** (:mod:`~backtester.validation.spa`) - White's Reality Check
+  and Hansen's test for superior predictive ability over a strategy family.
 """
 
 from backtester.validation.bootstrap import (
@@ -34,17 +36,20 @@ from backtester.validation.sharpe import (
     sharpe_inference,
     sharpe_ratio_std_error,
 )
+from backtester.validation.spa import SPAResult, long_run_variance, superior_predictive_ability
 
 __all__ = [
     "BlockLength",
     "BootstrapResult",
     "Interval",
     "PBOResult",
+    "SPAResult",
     "SharpeInference",
     "bootstrap_statistics",
     "default_statistics",
     "deflated_sharpe_ratio",
     "expected_max_sharpe",
+    "long_run_variance",
     "min_track_record_length",
     "optimal_block_length",
     "probabilistic_sharpe_ratio",
@@ -54,4 +59,5 @@ __all__ = [
     "sharpe_inference",
     "sharpe_ratio_std_error",
     "stationary_bootstrap_indices",
+    "superior_predictive_ability",
 ]
