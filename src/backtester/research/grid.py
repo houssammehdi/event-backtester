@@ -20,8 +20,8 @@ from backtester.config import BacktestConfig, Bound
 from backtester.data.feed import DataFeed
 from backtester.engine import BacktestResult
 from backtester.errors import ConfigError
-from backtester.research.deflated import deflated_sharpe_ratio, sample_moments
 from backtester.strategy.base import Strategy
+from backtester.validation.sharpe import deflated_sharpe_ratio, sample_moments
 
 StrategyFactory = Callable[..., Strategy]
 Objective = Callable[[BacktestResult], float]

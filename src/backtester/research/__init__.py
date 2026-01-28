@@ -1,11 +1,5 @@
 """Research tools: grid search, walk-forward optimisation, deflated Sharpe, fast path."""
 
-from backtester.research.deflated import (
-    deflated_sharpe_ratio,
-    expected_max_sharpe,
-    probabilistic_sharpe_ratio,
-    sample_moments,
-)
 from backtester.research.grid import (
     MULTIPLE_TESTING_NOTE,
     GridSearchResult,
@@ -19,6 +13,12 @@ from backtester.research.walkforward import (
     WalkForwardWindow,
     walk_forward,
     walk_forward_windows,
+)
+from backtester.validation.sharpe import (
+    deflated_sharpe_ratio,
+    expected_max_sharpe,
+    probabilistic_sharpe_ratio,
+    sample_moments,
 )
 
 __all__ = [
