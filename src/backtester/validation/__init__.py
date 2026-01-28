@@ -9,6 +9,8 @@ quantifies how much of its performance could be luck:
 * **Stationary bootstrap** (:mod:`~backtester.validation.bootstrap`) - confidence
   intervals for Sharpe, CAGR, drawdown and more, with automatic block-length
   selection.
+* **Probability of backtest overfitting** (:mod:`~backtester.validation.pbo`) -
+  combinatorially symmetric cross-validation of a parameter search.
 """
 
 from backtester.validation.bootstrap import (
@@ -21,6 +23,7 @@ from backtester.validation.bootstrap import (
     resample_counts,
     stationary_bootstrap_indices,
 )
+from backtester.validation.pbo import PBOResult, probability_of_backtest_overfitting
 from backtester.validation.sharpe import (
     SharpeInference,
     deflated_sharpe_ratio,
@@ -36,6 +39,7 @@ __all__ = [
     "BlockLength",
     "BootstrapResult",
     "Interval",
+    "PBOResult",
     "SharpeInference",
     "bootstrap_statistics",
     "default_statistics",
@@ -44,6 +48,7 @@ __all__ = [
     "min_track_record_length",
     "optimal_block_length",
     "probabilistic_sharpe_ratio",
+    "probability_of_backtest_overfitting",
     "resample_counts",
     "sample_moments",
     "sharpe_inference",
