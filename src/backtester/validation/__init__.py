@@ -13,6 +13,8 @@ quantifies how much of its performance could be luck:
   combinatorially symmetric cross-validation of a parameter search.
 * **Data-snooping tests** (:mod:`~backtester.validation.spa`) - White's Reality Check
   and Hansen's test for superior predictive ability over a strategy family.
+* **Purged cross-validation** (:mod:`~backtester.validation.cv`) - purged K-fold and
+  combinatorial purged CV with embargo, including CPCV backtest paths.
 """
 
 from backtester.validation.bootstrap import (
@@ -24,6 +26,15 @@ from backtester.validation.bootstrap import (
     optimal_block_length,
     resample_counts,
     stationary_bootstrap_indices,
+)
+from backtester.validation.cv import (
+    CombinatorialPurgedCV,
+    CPCVResult,
+    CVSplit,
+    PurgedKFold,
+    cpcv_backtest,
+    label_spans,
+    purged_train_indices,
 )
 from backtester.validation.pbo import PBOResult, probability_of_backtest_overfitting
 from backtester.validation.sharpe import (
@@ -41,19 +52,26 @@ from backtester.validation.spa import SPAResult, long_run_variance, superior_pre
 __all__ = [
     "BlockLength",
     "BootstrapResult",
+    "CPCVResult",
+    "CVSplit",
+    "CombinatorialPurgedCV",
     "Interval",
     "PBOResult",
+    "PurgedKFold",
     "SPAResult",
     "SharpeInference",
     "bootstrap_statistics",
+    "cpcv_backtest",
     "default_statistics",
     "deflated_sharpe_ratio",
     "expected_max_sharpe",
+    "label_spans",
     "long_run_variance",
     "min_track_record_length",
     "optimal_block_length",
     "probabilistic_sharpe_ratio",
     "probability_of_backtest_overfitting",
+    "purged_train_indices",
     "resample_counts",
     "sample_moments",
     "sharpe_inference",
