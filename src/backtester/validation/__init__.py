@@ -15,6 +15,7 @@ quantifies how much of its performance could be luck:
   and Hansen's test for superior predictive ability over a strategy family.
 * **Purged cross-validation** (:mod:`~backtester.validation.cv`) - purged K-fold and
   combinatorial purged CV with embargo, including CPCV backtest paths.
+* **Reports** (:mod:`~backtester.validation.report`) - all of the above in one call.
 """
 
 from backtester.validation.bootstrap import (
@@ -37,6 +38,12 @@ from backtester.validation.cv import (
     purged_train_indices,
 )
 from backtester.validation.pbo import PBOResult, probability_of_backtest_overfitting
+from backtester.validation.report import (
+    FamilyValidation,
+    StrategyValidation,
+    validate_family,
+    validate_returns,
+)
 from backtester.validation.sharpe import (
     SharpeInference,
     deflated_sharpe_ratio,
@@ -55,11 +62,13 @@ __all__ = [
     "CPCVResult",
     "CVSplit",
     "CombinatorialPurgedCV",
+    "FamilyValidation",
     "Interval",
     "PBOResult",
     "PurgedKFold",
     "SPAResult",
     "SharpeInference",
+    "StrategyValidation",
     "bootstrap_statistics",
     "cpcv_backtest",
     "default_statistics",
@@ -78,4 +87,6 @@ __all__ = [
     "sharpe_ratio_std_error",
     "stationary_bootstrap_indices",
     "superior_predictive_ability",
+    "validate_family",
+    "validate_returns",
 ]
