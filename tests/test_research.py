@@ -14,6 +14,7 @@ from hypothesis import strategies as st
 from backtester import ConfigError, DataFeed, MarketView, StrategyContext, generate_ohlcv
 from backtester.research import (
     WalkForwardWindow,
+    config_label,
     deflated_sharpe_ratio,
     expand_grid,
     expected_max_sharpe,
@@ -54,6 +55,29 @@ def test_grid_search_ranks_by_objective(feed: DataFeed) -> None:
     assert search.best_result.params["fast"] == search.best_params["fast"]
     assert 0.0 <= search.deflated_sharpe <= 1.0
     assert "4 configurations" in search.note()
+
+
+def test_grid_search_keeps_the_performance_matrix_and_validates(feed: DataFeed) -> None:
+    grid = {"fast": [5, 20], "slow": [50, 100]}
+    search = grid_search(feed, SmaCrossover, grid)
+    labels = [config_label(p) for p in expand_grid(grid)]
+    assert (
+        list(search.returns.columns)
+        == labels
+        == ["fast=5, slow=50", "fast=5, slow=100", "fast=20, slow=50", "fast=20, slow=100"]
+    )
+    best = config_label(search.best_params)
+    pd.testing.assert_series_equal(
+        search.returns[best], search.best_result.returns, check_names=False
+    )
+    assert search.lookback == 100  # the slow window of the longest configuration
+    report = search.validate(n_samples=200, pbo_splits=8)
+    assert report.best_label == best
+    assert report.pbo is not None
+    assert report.pbo.n_strategies == 4
+    assert report.lookback == 100
+    assert "Probability of backtest overfitting" in report.format()
+    assert config_label({}) == "default"
 
 
 class TestWindows:
@@ -143,6 +167,10 @@ def test_walk_forward_fits_never_see_out_of_sample_data(feed: DataFeed) -> None:
     assert set(m) >= {"sharpe", "cagr", "max_drawdown", "walk_forward_efficiency"}
     assert list(wf.windows["test_start"]) == [feed.index[w.test_start] for w in windows]
     assert "configurations" in wf.note()
+    assert wf.windows["is_pbo"].between(0, 1).all()
+    oos = wf.validate(n_samples=200)
+    assert oos.sharpe.n_obs == len(wf.oos_returns)
+    assert oos.sharpe.dsr is None  # out of sample: nothing to deflate
 
 
 def test_walk_forward_rejects_overlapping_windows(feed: DataFeed) -> None:

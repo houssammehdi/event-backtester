@@ -6,7 +6,7 @@ import itertools
 import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pandas as pd
 
@@ -23,11 +23,16 @@ from backtester.engine import BacktestResult
 from backtester.errors import ConfigError
 from backtester.research.grid import (
     MULTIPLE_TESTING_NOTE,
+    GridSearchResult,
     Objective,
     StrategyFactory,
     grid_search,
     sharpe_objective,
 )
+from backtester.validation.pbo import probability_of_backtest_overfitting
+
+if TYPE_CHECKING:
+    from backtester.validation.report import StrategyValidation
 
 
 @dataclass(frozen=True, slots=True)
@@ -135,6 +140,28 @@ class WalkForwardResult:
         """Multiple-testing warning for the in-sample searches."""
         return MULTIPLE_TESTING_NOTE.format(n=self.n_trials)
 
+    def validate(self, **kwargs: Any) -> StrategyValidation:
+        """Bootstrap intervals, PSR and MinTRL of the stitched out-of-sample returns.
+
+        The stitched curve is out of sample, so no deflation for the in-sample search
+        applies to it. Keyword arguments go to
+        :func:`~backtester.validation.validate_returns`.
+        """
+        from backtester.validation.report import validate_returns
+
+        options: dict[str, Any] = {"periods_per_year": self.periods_per_year}
+        options.update(kwargs)
+        return validate_returns(self.oos_returns, **options)
+
+
+def _in_sample_pbo(search: GridSearchResult, n_splits: int) -> float:
+    """PBO of one window's in-sample search (NaN for a single configuration)."""
+    splits = min(n_splits, len(search.returns) // 2)
+    splits -= splits % 2
+    if search.returns.shape[1] < 2 or splits < 2:
+        return math.nan
+    return probability_of_backtest_overfitting(search.returns, n_splits=splits).pbo
+
 
 def walk_forward(
     feed: DataFeed,
@@ -145,6 +172,7 @@ def walk_forward(
     config: BacktestConfig | None = None,
     objective: Objective = sharpe_objective,
     fixed: Mapping[str, Any] | None = None,
+    pbo_splits: int = 8,
 ) -> WalkForwardResult:
     """Run a walk-forward optimisation.
 
@@ -157,6 +185,10 @@ def walk_forward(
     Out-of-sample returns are stitched into one equity curve by compounding. Every
     window starts from flat, so the stitched curve includes re-entry costs at each
     boundary.
+
+    Each row of :attr:`WalkForwardResult.windows` reports the in-sample deflated
+    Sharpe ratio (``is_dsr``) and the probability of backtest overfitting of the
+    in-sample search (``is_pbo``, CSCV with ``pbo_splits`` blocks).
     """
     if not windows:
         raise ConfigError("need at least one window")
@@ -200,6 +232,7 @@ def walk_forward(
                 "is_objective": float(search.table["objective"].iloc[0]),
                 "is_sharpe": float(search.table["sharpe"].iloc[0]),
                 "is_dsr": search.deflated_sharpe,
+                "is_pbo": _in_sample_pbo(search, pbo_splits),
                 "oos_sharpe": sharpe_ratio(oos.returns, oos.periods_per_year),
                 "oos_return": total_return(
                     pd.concat([pd.Series([oos.initial_cash]), oos.equity.reset_index(drop=True)])

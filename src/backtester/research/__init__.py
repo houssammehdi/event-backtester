@@ -3,6 +3,7 @@
 from backtester.research.grid import (
     MULTIPLE_TESTING_NOTE,
     GridSearchResult,
+    config_label,
     expand_grid,
     grid_search,
     sharpe_objective,
@@ -27,6 +28,7 @@ __all__ = [
     "VectorizedResult",
     "WalkForwardResult",
     "WalkForwardWindow",
+    "config_label",
     "deflated_sharpe_ratio",
     "expand_grid",
     "expected_max_sharpe",

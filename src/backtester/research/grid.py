@@ -5,9 +5,10 @@ from __future__ import annotations
 import itertools
 import math
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
-from typing import Any
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any
 
+import numpy.typing as npt
 import pandas as pd
 
 from backtester.analytics.metrics import (
@@ -16,12 +17,17 @@ from backtester.analytics.metrics import (
     sharpe_ratio,
     total_return,
 )
+from backtester.analytics.report import format_params
 from backtester.config import BacktestConfig, Bound
 from backtester.data.feed import DataFeed
 from backtester.engine import BacktestResult
 from backtester.errors import ConfigError
 from backtester.strategy.base import Strategy
+from backtester.strategy.rebalancing import TargetWeightStrategy
 from backtester.validation.sharpe import deflated_sharpe_ratio, sample_moments
+
+if TYPE_CHECKING:
+    from backtester.validation.report import FamilyValidation
 
 StrategyFactory = Callable[..., Strategy]
 Objective = Callable[[BacktestResult], float]
@@ -52,6 +58,11 @@ def expand_grid(grid: Mapping[str, Sequence[Any]]) -> list[dict[str, Any]]:
     return [dict(zip(keys, combo, strict=True)) for combo in itertools.product(*grid.values())]
 
 
+def config_label(params: Mapping[str, Any]) -> str:
+    """Column label of one configuration: ``"k1=v1, k2=v2"`` (``"default"`` if empty)."""
+    return format_params(dict(params)) or "default"
+
+
 @dataclass(frozen=True, slots=True)
 class GridSearchResult:
     """Outcome of :func:`grid_search`."""
@@ -62,6 +73,13 @@ class GridSearchResult:
     best_result: BacktestResult
     deflated_sharpe: float
     """Deflated Sharpe ratio of the best configuration given all trials."""
+    returns: pd.DataFrame = field(repr=False)
+    """Bar returns of every configuration over the evaluation window, one column per
+    configuration in grid order (labels from :func:`config_label`): the performance
+    matrix the overfitting and data-snooping statistics work on."""
+    lookback: int = 0
+    """Largest warm-up history any configuration needs (``history_bars`` of
+    target-weight strategies; 0 when unknown)."""
 
     @property
     def n_trials(self) -> int:
@@ -71,6 +89,26 @@ class GridSearchResult:
     def note(self) -> str:
         """The multiple-testing warning for this search."""
         return MULTIPLE_TESTING_NOTE.format(n=self.n_trials)
+
+    def validate(
+        self,
+        benchmark: pd.Series | npt.ArrayLike | None = None,
+        **kwargs: Any,
+    ) -> FamilyValidation:
+        """Overfitting and data-snooping statistics of this search.
+
+        Runs :func:`~backtester.validation.validate_family` on :attr:`returns`, with
+        :attr:`lookback` as the purge interval of the CPCV. Keyword arguments are
+        passed through (``n_samples``, ``pbo_splits``, ``benchmark_name``, ...).
+        """
+        from backtester.validation.report import validate_family
+
+        options: dict[str, Any] = {
+            "periods_per_year": self.best_result.periods_per_year,
+            "lookback": self.lookback,
+        }
+        options.update(kwargs)
+        return validate_family(self.returns, benchmark, **options)
 
 
 def grid_search(
@@ -101,8 +139,11 @@ def grid_search(
     combos = expand_grid(grid)
     rows: list[dict[str, Any]] = []
     results: list[BacktestResult] = []
+    lookback = 0
     for params in combos:
         strategy = factory(**{**(fixed or {}), **params})
+        if isinstance(strategy, TargetWeightStrategy):
+            lookback = max(lookback, strategy.history_bars)
         result = cfg.run(feed, strategy, start=start, end=end)
         eq = result.equity
         per_period_sharpe = sample_moments(result.returns)[0]
@@ -124,9 +165,14 @@ def grid_search(
     best_pos = int(order[0])
     dsr = deflated_sharpe_ratio(results[best_pos].returns, table["_sr"].to_numpy())
     table = table.loc[order].drop(columns="_sr").reset_index(drop=True)
+    returns = pd.DataFrame(
+        {config_label(p): r.returns for p, r in zip(combos, results, strict=True)}
+    )
     return GridSearchResult(
         table=table,
         best_params=dict(combos[best_pos]),
         best_result=results[best_pos],
         deflated_sharpe=dsr,
+        returns=returns,
+        lookback=lookback,
     )
