@@ -60,6 +60,51 @@ def test_walkforward_prints_windows_and_warning(capsys: pytest.CaptureFixture[st
     assert "Stitched out-of-sample" in out
     assert "deflated Sharpe" in out
     assert "fast=" in out
+    assert "IS PBO" in out
+    assert "Out-of-sample uncertainty" in out
+    assert "Min. track record" in out
+
+
+@pytest.mark.parametrize("benchmark", ["cash", "buyhold"])
+def test_validate_reports_overfitting_and_snooping(
+    benchmark: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    code = main(
+        [
+            "validate",
+            "--strategy",
+            "sma",
+            "--symbols",
+            "3",
+            "--years",
+            "4",
+            "--seed",
+            "5",
+            "-g",
+            "fast=10,20",
+            "-g",
+            "slow=50,100",
+            "--samples",
+            "200",
+            "--pbo-splits",
+            "8",
+            "--benchmark",
+            benchmark,
+        ]
+    )
+    out = capsys.readouterr().out
+    assert code == 0
+    for needle in (
+        "4 configurations",
+        "fast=10, slow=50",
+        "Deflated Sharpe (4 trials)",
+        "Probability of backtest overfitting",
+        "Hansen SPA (consistent)",
+        "Combinatorial purged CV",
+        "within 100 bars",
+    ):
+        assert needle in out
+    assert ("buy & hold" in out) == (benchmark == "buyhold")
 
 
 def test_generate_then_run_from_csv(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -82,6 +127,7 @@ def test_errors_exit_with_code_2(capsys: pytest.CaptureFixture[str]) -> None:
     assert "unknown parameter" in capsys.readouterr().err
     assert main(["run", "--years", "1", "-p", "novalue"]) == 2
     assert main(["walkforward", "--years", "1", "-g", "bad=1"]) == 2
+    assert main(["validate", "--years", "1", "-g", "bad=1"]) == 2
 
 
 def test_plot_option_writes_png(tmp_path: Path) -> None:

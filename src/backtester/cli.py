@@ -1,4 +1,4 @@
-"""Command-line interface: ``backtest run | walkforward | generate | strategies``."""
+"""Command-line interface: ``backtest run | walkforward | validate | generate | strategies``."""
 
 from __future__ import annotations
 
@@ -23,10 +23,12 @@ from backtester.data.synthetic import TRADING_DAYS, generate_ohlcv
 from backtester.errors import BacktesterError, ConfigError
 from backtester.execution.commission import BpsCommission, CommissionModel, PerShareCommission
 from backtester.execution.slippage import FixedBpsSlippage, SlippageModel, SquareRootImpactSlippage
+from backtester.research.grid import config_label, grid_search
 from backtester.research.walkforward import walk_forward, walk_forward_windows
 from backtester.risk import RiskLimits
 from backtester.strategies import STRATEGIES
 from backtester.strategy.rebalancing import TargetWeightStrategy
+from backtester.validation.cv import CombinatorialPurgedCV
 
 DEFAULT_GRIDS: dict[str, dict[str, list[Any]]] = {
     "sma": {"fast": [20, 50], "slow": [100, 200]},
@@ -114,6 +116,24 @@ def _strategy_arg(p: argparse.ArgumentParser) -> None:
     p.add_argument("--strategy", "-s", choices=sorted(STRATEGIES), default="tsmom")
 
 
+def _grid_arg(p: argparse.ArgumentParser) -> None:
+    p.add_argument(
+        "--grid",
+        "-g",
+        action="append",
+        default=[],
+        help="parameter grid key=v1,v2,... (repeatable; defaults per strategy)",
+    )
+
+
+def _add_bootstrap_args(p: argparse.ArgumentParser) -> None:
+    g = p.add_argument_group("statistics")
+    g.add_argument("--samples", type=int, default=2000, help="bootstrap resamples (default 2000)")
+    g.add_argument(
+        "--boot-seed", type=int, default=0, help="seed of the bootstrap resampling (default 0)"
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Create the argument parser."""
     parser = argparse.ArgumentParser(
@@ -134,13 +154,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     wf = sub.add_parser("walkforward", help="walk-forward optimisation with stitched OOS")
     _strategy_arg(wf)
-    wf.add_argument(
-        "--grid",
-        "-g",
-        action="append",
-        default=[],
-        help="parameter grid key=v1,v2,... (repeatable; defaults per strategy)",
-    )
+    _grid_arg(wf)
     wf.add_argument("--train-bars", type=int, default=3 * TRADING_DAYS, help="in-sample bars")
     wf.add_argument("--test-bars", type=int, default=TRADING_DAYS, help="out-of-sample bars")
     wf.add_argument("--warmup", type=int, default=TRADING_DAYS, help="bars before first fit")
@@ -149,6 +163,36 @@ def build_parser() -> argparse.ArgumentParser:
     wf.add_argument("--plot", type=Path, help="save the stitched OOS equity PNG here")
     _add_data_args(wf)
     _add_exec_args(wf)
+    _add_bootstrap_args(wf)
+
+    val = sub.add_parser(
+        "validate",
+        help="overfitting and data-snooping statistics of a parameter search",
+        description=(
+            "Backtest every configuration of a grid over the whole sample, then report "
+            "the selected configuration's bootstrap intervals, PSR, MinTRL and deflated "
+            "Sharpe; the probability of backtest overfitting (CSCV); White's Reality "
+            "Check and Hansen's SPA against a benchmark; and the out-of-sample Sharpe "
+            "ratios of combinatorial purged CV backtest paths."
+        ),
+    )
+    _strategy_arg(val)
+    _grid_arg(val)
+    val.add_argument(
+        "--benchmark",
+        choices=("cash", "buyhold"),
+        default="cash",
+        help="SPA/RC benchmark: zero returns or equal-weight buy-and-hold (default cash)",
+    )
+    val.add_argument("--pbo-splits", type=int, default=16, help="CSCV blocks (even, default 16)")
+    val.add_argument("--cpcv-groups", type=int, default=6, help="CPCV groups (default 6)")
+    val.add_argument("--cpcv-test", type=int, default=2, help="CPCV test groups (default 2)")
+    val.add_argument(
+        "--embargo", type=int, default=0, help="CPCV embargo bars after each test block"
+    )
+    _add_data_args(val)
+    _add_exec_args(val)
+    _add_bootstrap_args(val)
 
     gen = sub.add_parser("generate", help="write synthetic OHLCV data to CSV")
     gen.add_argument("--out", type=Path, required=True, help="output CSV path")
@@ -229,15 +273,69 @@ def _cmd_run(args: argparse.Namespace) -> int:
     return 0
 
 
+def _resolve_grid(args: argparse.Namespace) -> dict[str, list[Any]]:
+    grid = _parse_grid(args.grid) if args.grid else DEFAULT_GRIDS[args.strategy]
+    unknown = set(grid) - _strategy_params(args.strategy)
+    if unknown:
+        raise ConfigError(f"unknown grid parameter(s) for {args.strategy}: {sorted(unknown)}")
+    return grid
+
+
+def _describe_grid(grid: dict[str, list[Any]]) -> str:
+    return ", ".join(f"{k}={v}" for k, v in grid.items())
+
+
+def _cmd_validate(args: argparse.Namespace) -> int:
+    feed = _load_feed(args)
+    cfg = _config(args)
+    grid = _resolve_grid(args)
+    t0 = time.perf_counter()
+    search = grid_search(feed, STRATEGIES[args.strategy], grid, config=cfg)
+    elapsed = time.perf_counter() - t0
+    benchmark = None
+    if args.benchmark == "buyhold":
+        bench = search.best_result.benchmark_equity()
+        benchmark = bench.pct_change().iloc[1:].reindex(search.returns.index)
+    n_bars = len(search.returns) + 1
+    print(f"Validation: {args.strategy}  grid: {_describe_grid(grid)}")
+    print(
+        f"{search.n_trials} configurations, each backtested on all {n_bars} bars "
+        f"({feed.index[0].date()} -> {feed.index[-1].date()}, {len(feed.symbols)} symbols)"
+    )
+    print()
+    # to_dict keeps each column's dtype (iterrows would upcast integer parameters)
+    rows = [
+        (
+            config_label({k: row[k] for k in grid}),
+            num(row["sharpe"]),
+            pct(row["cagr"]),
+            pct(row["max_drawdown"]),
+        )
+        for row in search.table.to_dict("records")
+    ]
+    print(table(rows, header=("Configuration (best first)", "Sharpe", "CAGR", "Max DD")))
+    print()
+    report = search.validate(
+        benchmark,
+        benchmark_name="buy & hold (EW)" if args.benchmark == "buyhold" else "cash",
+        n_samples=args.samples,
+        pbo_splits=args.pbo_splits,
+        cpcv=CombinatorialPurgedCV(args.cpcv_groups, args.cpcv_test, embargo=args.embargo),
+        seed=args.boot_seed,
+    )
+    print(report.format())
+    print()
+    print(_describe_costs(cfg))
+    print(f"Ran {search.n_trials} backtests in {elapsed:.1f}s")
+    return 0
+
+
 def _cmd_walkforward(args: argparse.Namespace) -> int:
     if args.plot is not None:
         _headless_plotting()
     feed = _load_feed(args)
     cfg = _config(args)
-    grid = _parse_grid(args.grid) if args.grid else DEFAULT_GRIDS[args.strategy]
-    unknown = set(grid) - _strategy_params(args.strategy)
-    if unknown:
-        raise ConfigError(f"unknown grid parameter(s) for {args.strategy}: {sorted(unknown)}")
+    grid = _resolve_grid(args)
     windows = walk_forward_windows(
         len(feed),
         args.train_bars,
@@ -249,8 +347,7 @@ def _cmd_walkforward(args: argparse.Namespace) -> int:
     t0 = time.perf_counter()
     wf = walk_forward(feed, STRATEGIES[args.strategy], grid, windows, config=cfg)
     elapsed = time.perf_counter() - t0
-    grid_desc = ", ".join(f"{k}={v}" for k, v in grid.items())
-    print(f"Walk-forward: {args.strategy}  grid: {grid_desc}")
+    print(f"Walk-forward: {args.strategy}  grid: {_describe_grid(grid)}")
     print(
         f"{len(windows)} windows, train={args.train_bars} bars, test={args.test_bars} bars, "
         f"{'anchored' if args.anchored else 'rolling'}, gap={args.gap}"
@@ -266,11 +363,20 @@ def _cmd_walkforward(args: argparse.Namespace) -> int:
                 params,
                 num(w["is_sharpe"]),
                 num(w["is_dsr"]),
+                pct(w["is_pbo"], 0),
                 num(w["oos_sharpe"]),
                 pct(w["oos_return"]),
             )
         )
-    header = ("OOS window", "chosen params", "IS Sharpe", "IS DSR", "OOS Sharpe", "OOS return")
+    header = (
+        "OOS window",
+        "chosen params",
+        "IS Sharpe",
+        "IS DSR",
+        "IS PBO",
+        "OOS Sharpe",
+        "OOS return",
+    )
     print(table(rows, header=header))
     print()
     m = wf.metrics()
@@ -287,6 +393,9 @@ def _cmd_walkforward(args: argparse.Namespace) -> int:
         ("Walk-forward efficiency", num(m["walk_forward_efficiency"]), ""),
     ]
     print(table(summary, header=("Stitched out-of-sample", "Strategy", "Buy & hold (EW)")))
+    print()
+    validation = wf.validate(n_samples=args.samples, seed=args.boot_seed)
+    print(validation.format("Out-of-sample uncertainty"))
     print()
     print(wf.note())
     print(_describe_costs(cfg))
@@ -324,6 +433,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     commands = {
         "run": _cmd_run,
         "walkforward": _cmd_walkforward,
+        "validate": _cmd_validate,
         "generate": _cmd_generate,
         "strategies": _cmd_strategies,
     }
