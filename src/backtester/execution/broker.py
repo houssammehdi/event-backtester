@@ -1,9 +1,11 @@
-"""Simulated broker: order book, bar-level matching, slippage, commission, participation."""
+"""Simulated broker: order book, linked orders, and matching along an intrabar path."""
 
 from __future__ import annotations
 
+import copy
 import math
-from dataclasses import dataclass
+from collections.abc import Sequence
+from typing import Literal
 
 import pandas as pd
 
@@ -11,18 +13,15 @@ from backtester.data.feed import Bar, MarketView
 from backtester.errors import ConfigError, OrderError
 from backtester.events import FillEvent, OrderEvent
 from backtester.execution.commission import CommissionModel, NoCommission
+from backtester.execution.matching import BarSimulation, SimulatedFill, settle_bracket
 from backtester.execution.slippage import NoSlippage, SlippageModel
-from backtester.orders import Order, OrderStatus, OrderType, Side, TimeInForce
+from backtester.orders import Order, OrderStatus, OrderType, TimeInForce
 
-
-@dataclass(frozen=True, slots=True)
-class _Match:
-    """Where an order would execute on a bar, before slippage and sizing."""
-
-    reference: float
-    """Price before slippage."""
-    limit: float | None
-    """Best acceptable price after slippage (limit-type executions), if any."""
+IntrabarPath = Literal["worst", "best", "high_first", "low_first"]
+_PATHS = ("worst", "best", "high_first", "low_first")
+_INTRABAR = frozenset(
+    {OrderType.LIMIT, OrderType.STOP, OrderType.STOP_LIMIT, OrderType.TRAILING_STOP}
+)
 
 
 class SimulatedBroker:
@@ -32,19 +31,40 @@ class SimulatedBroker:
 
     * An order submitted at the close of bar ``t`` first becomes eligible on bar
       ``t + 1``; nothing ever fills on the bar that generated it.
-    * **Market** orders fill at the open.
+    * **Market** and **market-on-open** orders fill at the open; **market-on-close**
+      orders at the close.
     * **Limit** orders fill at the open if the bar gaps through the limit (a better
-      price), otherwise at the limit price if the bar's range reaches it.
+      price), otherwise at the limit price where the path reaches it.
     * **Stop** orders trigger at the open if the bar gaps through the stop (and fill at
-      the open - a worse price), otherwise at the stop price if the range reaches it.
-    * **Stop-limit** orders become limit orders once triggered. If the stop triggers
-      intrabar and the limit is on the far side of the stop, the fill is deferred to
-      later bars because the intrabar path after the trigger is unknown.
+      the open - a worse price), otherwise at the stop price.
+    * **Stop-limit** orders become limit orders once triggered; a limit on the far side
+      of the stop can still fill later on the same bar if the path comes back to it.
+    * **Trailing stops** trail the best price since they became active - the high for
+      a sell, the low for a buy - by ``trail_amount`` or ``trail_percent``, ratcheting
+      along the intrabar path.
+    * **Brackets**: exits (``parent_id`` set) are armed by their entry's first fill,
+      work for the quantity the entry opened, reduce each other (a fill of one lowers
+      the other by the same amount) and end the entry's unfilled remainder. They can
+      fill on the entry's own bar, after the entry on the path. If the entry never
+      fills, they are cancelled.
+    * **OCO groups**: the first fill of an order of a group cancels the others. All
+      members must be orders on the same symbol.
     * Slippage is applied adversely to the reference price; limit-type executions are
       then capped at their limit price.
     * With ``max_participation`` set, the total quantity filled per symbol and bar is
-      capped at that fraction of the bar's volume; the remainder stays working (GTC)
-      or expires (DAY).
+      capped at that fraction of the bar's volume, allocated in path order; the
+      remainder stays working (GTC) or expires (DAY).
+
+    **Which intrabar path.** A bar does not say whether the high came before the low.
+    For independent limit and stop orders it does not matter. When it does - both exits
+    of a bracket inside one bar, OCO orders, trailing stops, stop-limits and contested
+    participation capacity - ``intrabar`` decides:
+
+    * ``"worst"`` (default): simulate open-high-low-close and open-low-high-close and
+      keep the one whose fills leave the lower equity at the bar's close (the stop, not
+      the target, when both could have traded);
+    * ``"best"``: the higher equity (optimistic, for sensitivity analysis only);
+    * ``"high_first"`` / ``"low_first"``: always that path.
 
     Args:
         slippage: Slippage model (default: none).
@@ -54,6 +74,7 @@ class SimulatedBroker:
         strict_limits: If true, a limit order needs the price to trade *through* its
             limit (not merely touch it) to fill intrabar - a more conservative
             assumption about queue position.
+        intrabar: Path policy, see above.
     """
 
     def __init__(
@@ -63,15 +84,20 @@ class SimulatedBroker:
         *,
         max_participation: float | None = None,
         strict_limits: bool = False,
+        intrabar: IntrabarPath = "worst",
     ) -> None:
         if max_participation is not None and not 0 < max_participation <= 1:
             raise ConfigError("max_participation must be in (0, 1]")
+        if intrabar not in _PATHS:
+            raise ConfigError(f"intrabar must be one of {_PATHS}")
         self.slippage: SlippageModel = slippage or NoSlippage()
         self.commission: CommissionModel = commission or NoCommission()
         self.max_participation = max_participation
         self.strict_limits = strict_limits
+        self.intrabar: IntrabarPath = intrabar
         self._orders: dict[int, Order] = {}
         self._open: dict[int, Order] = {}
+        self._children: dict[int, list[int]] = {}
 
     # ------------------------------------------------------------------ order book
     @property
@@ -91,6 +117,17 @@ class SimulatedBroker:
         """Accept an approved order. It becomes eligible from the next bar on."""
         if event.order_id in self._orders:
             raise OrderError(f"duplicate order id {event.order_id}")
+        if event.parent_id is not None:
+            parent = self._orders.get(event.parent_id)
+            if parent is None or parent.symbol != event.symbol:
+                raise OrderError(
+                    f"order {event.order_id}: no entry {event.parent_id} on {event.symbol}"
+                )
+        if event.oco_group is not None:
+            for other in self._orders.values():
+                if other.oco_group == event.oco_group and other.symbol != event.symbol:
+                    raise OrderError("all orders of an OCO group must be on the same symbol")
+        reference = math.nan if event.trail_reference is None else float(event.trail_reference)
         order = Order(
             id=event.order_id,
             symbol=event.symbol,
@@ -102,9 +139,17 @@ class SimulatedBroker:
             limit_price=event.limit_price,
             stop_price=event.stop_price,
             tag=event.tag,
+            trail_amount=event.trail_amount,
+            trail_percent=event.trail_percent,
+            trail_reference=reference,
+            parent_id=event.parent_id,
+            oco_group=event.oco_group,
+            armed=event.parent_id is None,
         )
         self._orders[order.id] = order
         self._open[order.id] = order
+        if order.parent_id is not None:
+            self._children.setdefault(order.parent_id, []).append(order.id)
         return order
 
     def record_rejection(self, event: OrderEvent) -> Order:
@@ -114,15 +159,20 @@ class SimulatedBroker:
         return order
 
     def cancel(self, order_id: int, timestamp: pd.Timestamp) -> bool:
-        """Cancel a working order. Returns ``False`` if it was not open."""
+        """Cancel a working order. Returns ``False`` if it was not open.
+
+        Cancelling a bracket entry before it fills also cancels its exits; after a
+        partial fill the exits keep protecting the filled quantity.
+        """
         order = self._open.get(order_id)
         if order is None:
             return False
         self._close(order, OrderStatus.CANCELLED, timestamp)
+        self._settle(order, timestamp)
         return True
 
     def cancel_all(self, timestamp: pd.Timestamp, symbol: str | None = None) -> list[Order]:
-        """Cancel every working order (of ``symbol`` if given)."""
+        """Cancel every working order (of ``symbol`` if given), exits included."""
         cancelled = self.open_orders(symbol)
         for order in cancelled:
             self._close(order, OrderStatus.CANCELLED, timestamp)
@@ -133,111 +183,121 @@ class SimulatedBroker:
         order.closed_at = timestamp
         self._open.pop(order.id, None)
 
+    def _settle(self, parent: Order, timestamp: pd.Timestamp) -> None:
+        """Apply the bracket rules after ``parent`` (an entry) stopped working."""
+        if parent.id not in self._children:
+            return
+        settle_bracket(parent, self._children, self.get)
+        for child_id in self._children[parent.id]:
+            self._sync(self._orders[child_id], timestamp)
+
+    def _sync(self, order: Order, timestamp: pd.Timestamp) -> None:
+        """Take an order that reached a terminal state out of the open book."""
+        if order.status.is_terminal and order.id in self._open:
+            order.closed_at = timestamp
+            del self._open[order.id]
+
     # ------------------------------------------------------------------ matching
     def process_bar(self, view: MarketView) -> list[FillEvent]:
         """Match working orders against the bar at ``view.timestamp``.
 
-        Returns the resulting fills in the order they were generated (order id order).
+        Returns the fills in the order they happened on the bar: by path time (open,
+        intrabar, close), then by order id.
         """
         ts = view.timestamp
-        fills: list[FillEvent] = []
-        used: dict[str, float] = {}
+        by_symbol: dict[str, list[Order]] = {}
         for order in sorted(self._open.values(), key=lambda o: o.id):
-            if order.created_at >= ts:
-                continue
-            bar = view.bar(order.symbol)
+            if order.created_at < ts:
+                by_symbol.setdefault(order.symbol, []).append(order)
+        timed: list[tuple[float, int, FillEvent]] = []
+        for symbol, orders in by_symbol.items():
+            bar = view.bar(symbol)
             if bar is not None:
-                fill = self._try_fill(order, bar, used)
-                if fill is not None:
-                    fills.append(fill)
-            if order.status is OrderStatus.FILLED:
-                self._close(order, OrderStatus.FILLED, ts)
-            elif order.tif is TimeInForce.DAY:
-                self._close(order, OrderStatus.EXPIRED, ts)
-        return fills
+                for fill in self._match(orders, bar):
+                    event = FillEvent(
+                        timestamp=ts,
+                        order_id=fill.order_id,
+                        symbol=symbol,
+                        side=self._orders[fill.order_id].side,
+                        quantity=fill.quantity,
+                        price=fill.price,
+                        commission=fill.commission,
+                        slippage=fill.slippage,
+                    )
+                    timed.append((fill.time, fill.order_id, event))
+            self._end_of_bar([o.id for o in orders], ts)
+        timed.sort(key=lambda item: (item[0], item[1]))
+        return [event for _, _, event in timed]
 
-    def _capacity(self, bar: Bar, used: dict[str, float]) -> float:
+    def _capacity(self, bar: Bar) -> float:
         if self.max_participation is None:
             return math.inf
-        cap = math.floor(self.max_participation * bar.volume)
-        return max(cap - used.get(bar.symbol, 0.0), 0.0)
+        return float(math.floor(self.max_participation * bar.volume))
 
-    def _try_fill(self, order: Order, bar: Bar, used: dict[str, float]) -> FillEvent | None:
-        match = self._match(order, bar)
-        if match is None:
-            return None
-        quantity = min(order.remaining, self._capacity(bar, used))
-        if quantity <= 0:
-            return None
-        price = self.slippage.fill_price(match.reference, order.side, quantity, bar)
-        if match.limit is not None:
-            price = min(price, match.limit) if order.side is Side.BUY else max(price, match.limit)
-        commission = self.commission.commission(quantity, price)
-        order.record_fill(quantity, price)
-        used[bar.symbol] = used.get(bar.symbol, 0.0) + quantity
-        return FillEvent(
-            timestamp=bar.timestamp,
-            order_id=order.id,
-            symbol=order.symbol,
-            side=order.side,
-            quantity=quantity,
-            price=price,
-            commission=commission,
-            slippage=abs(price - match.reference) * quantity,
+    def _path_sensitive(self, orders: Sequence[Order], capacity: float) -> bool:
+        """Whether the intrabar path can change this symbol's fills on this bar."""
+        intrabar = 0
+        for order in orders:
+            if (
+                order.order_type in (OrderType.STOP_LIMIT, OrderType.TRAILING_STOP)
+                or order.parent_id is not None
+                or order.oco_group is not None
+                or order.id in self._children
+            ):
+                return True
+            intrabar += order.order_type in _INTRABAR
+        return math.isfinite(capacity) and intrabar > 1
+
+    def _simulate(
+        self, orders: Sequence[Order], bar: Bar, capacity: float, *, high_first: bool
+    ) -> BarSimulation:
+        local = {o.id: o for o in orders}
+        sim = BarSimulation(
+            orders,
+            lambda oid: local.get(oid) or self._orders[oid],
+            self._children,
+            bar,
+            high_first=high_first,
+            capacity=capacity,
+            slippage=self.slippage,
+            commission=self.commission,
+            strict_limits=self.strict_limits,
         )
+        sim.run()
+        return sim
 
-    def _match(self, order: Order, bar: Bar) -> _Match | None:
-        kind = order.order_type
-        if kind is OrderType.MARKET:
-            return _Match(bar.open, None)
-        if kind is OrderType.LIMIT:
-            assert order.limit_price is not None
-            return self._match_limit(order.side, order.limit_price, bar)
-        if kind is OrderType.STOP:
-            assert order.stop_price is not None
-            return self._match_stop(order.side, order.stop_price, bar)
-        return self._match_stop_limit(order, bar)
+    def _match(self, orders: list[Order], bar: Bar) -> list[SimulatedFill]:
+        capacity = self._capacity(bar)
+        if self.intrabar in ("high_first", "low_first") or not self._path_sensitive(
+            orders, capacity
+        ):
+            high_first = self.intrabar != "low_first"
+            return self._simulate(orders, bar, capacity, high_first=high_first).fills
+        # Compare both paths on copies, then install the chosen copies in the book.
+        candidates = []
+        for high_first in (True, False):
+            copies = [copy.copy(o) for o in orders]
+            sim = self._simulate(copies, bar, capacity, high_first=high_first)
+            candidates.append((copies, sim))
+        values = [sim.close_value() for _, sim in candidates]
+        worse_second = values[1] < values[0]
+        pick_second = worse_second if self.intrabar == "worst" else values[1] > values[0]
+        copies, chosen = candidates[1] if pick_second else candidates[0]
+        for replacement in copies:
+            self._orders[replacement.id] = replacement
+            if replacement.id in self._open:
+                self._open[replacement.id] = replacement
+        return chosen.fills
 
-    def _match_limit(self, side: Side, limit: float, bar: Bar) -> _Match | None:
-        if side is Side.BUY:
-            if bar.open <= limit:
-                return _Match(bar.open, limit)
-            reached = bar.low < limit if self.strict_limits else bar.low <= limit
-        else:
-            if bar.open >= limit:
-                return _Match(bar.open, limit)
-            reached = bar.high > limit if self.strict_limits else bar.high >= limit
-        return _Match(limit, limit) if reached else None
-
-    @staticmethod
-    def _stop_trigger(side: Side, stop: float, bar: Bar) -> tuple[bool, bool]:
-        """Return ``(triggered_at_open, triggered_intrabar)``."""
-        if side is Side.BUY:
-            return bar.open >= stop, bar.high >= stop
-        return bar.open <= stop, bar.low <= stop
-
-    def _match_stop(self, side: Side, stop: float, bar: Bar) -> _Match | None:
-        at_open, intrabar = self._stop_trigger(side, stop, bar)
-        if at_open:
-            return _Match(bar.open, None)
-        if intrabar:
-            return _Match(stop, None)
-        return None
-
-    def _match_stop_limit(self, order: Order, bar: Bar) -> _Match | None:
-        assert order.stop_price is not None
-        assert order.limit_price is not None
-        stop, limit, side = order.stop_price, order.limit_price, order.side
-        if order.triggered:
-            return self._match_limit(side, limit, bar)
-        at_open, intrabar = self._stop_trigger(side, stop, bar)
-        if at_open:
-            order.triggered = True
-            return self._match_limit(side, limit, bar)
-        if not intrabar:
-            return None
-        order.triggered = True
-        # Triggered at the stop price mid-bar: marketable immediately only if the limit
-        # is at or beyond the stop; otherwise the post-trigger path is unknown.
-        marketable = limit >= stop if side is Side.BUY else limit <= stop
-        return _Match(stop, limit) if marketable else None
+    def _end_of_bar(self, order_ids: list[int], timestamp: pd.Timestamp) -> None:
+        """Close what finished on this bar, expire DAY orders, settle brackets."""
+        for oid in order_ids:
+            order = self._orders[oid]
+            if not order.status.is_terminal and order.armed and order.tif is TimeInForce.DAY:
+                order.status = OrderStatus.EXPIRED
+            if order.status.is_terminal:
+                self._sync(order, timestamp)
+        for oid in order_ids:
+            order = self._orders[oid]
+            if order.status.is_terminal and oid in self._children:
+                self._settle(order, timestamp)

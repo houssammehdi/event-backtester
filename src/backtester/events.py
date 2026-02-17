@@ -72,7 +72,11 @@ class MarketEvent(Event):
 
 @dataclass(frozen=True, slots=True)
 class SignalEvent(Event):
-    """A strategy's request to trade a specific quantity, pending risk review."""
+    """A strategy's request to trade a specific quantity, pending risk review.
+
+    ``parent_id`` marks an exit of a bracket (it is armed when the parent fills and is
+    not risk-sized); ``oco_group`` links one-cancels-other orders.
+    """
 
     priority: ClassVar[int] = 2
     order_id: int
@@ -84,9 +88,20 @@ class SignalEvent(Event):
     limit_price: float | None = None
     stop_price: float | None = None
     tag: str = ""
+    trail_amount: float | None = None
+    trail_percent: float | None = None
+    oco_group: int | None = None
+    parent_id: int | None = None
 
     def __post_init__(self) -> None:
-        validate_order_spec(abs(self.quantity), self.order_type, self.limit_price, self.stop_price)
+        validate_order_spec(
+            abs(self.quantity),
+            self.order_type,
+            self.limit_price,
+            self.stop_price,
+            trail_amount=self.trail_amount,
+            trail_percent=self.trail_percent,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -117,7 +132,11 @@ class CancelEvent(Event):
 
 @dataclass(frozen=True, slots=True)
 class OrderEvent(Event):
-    """A risk-approved order ready to be submitted to the broker."""
+    """A risk-approved order ready to be submitted to the broker.
+
+    ``trail_reference`` is the price a trailing stop starts trailing from (the close
+    the decision was made on); exits of a bracket start from their entry's fill price.
+    """
 
     priority: ClassVar[int] = 3
     order_id: int
@@ -129,9 +148,21 @@ class OrderEvent(Event):
     limit_price: float | None = None
     stop_price: float | None = None
     tag: str = ""
+    trail_amount: float | None = None
+    trail_percent: float | None = None
+    trail_reference: float | None = None
+    oco_group: int | None = None
+    parent_id: int | None = None
 
     def __post_init__(self) -> None:
-        validate_order_spec(self.quantity, self.order_type, self.limit_price, self.stop_price)
+        validate_order_spec(
+            self.quantity,
+            self.order_type,
+            self.limit_price,
+            self.stop_price,
+            trail_amount=self.trail_amount,
+            trail_percent=self.trail_percent,
+        )
 
 
 class EventQueue:

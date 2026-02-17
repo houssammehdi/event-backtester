@@ -41,6 +41,7 @@ from backtester.events import (
 from backtester.execution import (
     BpsCommission,
     FixedBpsSlippage,
+    IntrabarPath,
     NoCommission,
     NoSlippage,
     PerShareCommission,
@@ -70,6 +71,7 @@ __all__ = [
     "EventQueue",
     "FillEvent",
     "FixedBpsSlippage",
+    "IntrabarPath",
     "LookAheadError",
     "MarketEvent",
     "MarketView",

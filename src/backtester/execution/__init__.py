@@ -1,6 +1,6 @@
 """Order execution simulation: broker, slippage and commission models."""
 
-from backtester.execution.broker import SimulatedBroker
+from backtester.execution.broker import IntrabarPath, SimulatedBroker
 from backtester.execution.commission import (
     BpsCommission,
     CommissionModel,
@@ -18,6 +18,7 @@ __all__ = [
     "BpsCommission",
     "CommissionModel",
     "FixedBpsSlippage",
+    "IntrabarPath",
     "NoCommission",
     "NoSlippage",
     "PerShareCommission",

@@ -31,12 +31,29 @@ class Side(Enum):
 
 
 class OrderType(StrEnum):
-    """Supported order types."""
+    """Supported order types.
+
+    Execution happens on bars after the one the order was decided on:
+
+    * ``MARKET`` - the next bar's opening auction (the open).
+    * ``MARKET_ON_OPEN`` - the same; the explicit name for an opening-auction order.
+    * ``MARKET_ON_CLOSE`` - the next bar's closing auction (the close). Decided at the
+      close of bar ``t``, it fills at the close of ``t + 1``: the close of ``t`` has
+      already happened when the decision is made, so filling there would be
+      look-ahead.
+    * ``LIMIT``, ``STOP``, ``STOP_LIMIT`` - at the open when the bar gaps through the
+      price, otherwise where the intrabar path reaches it.
+    * ``TRAILING_STOP`` - a stop that trails the best price seen since the order
+      became active by ``trail_amount`` (absolute) or ``trail_percent`` (fraction).
+    """
 
     MARKET = "market"
     LIMIT = "limit"
     STOP = "stop"
     STOP_LIMIT = "stop_limit"
+    TRAILING_STOP = "trailing_stop"
+    MARKET_ON_OPEN = "market_on_open"
+    MARKET_ON_CLOSE = "market_on_close"
 
 
 class TimeInForce(StrEnum):
@@ -77,12 +94,17 @@ def validate_order_spec(
     order_type: OrderType,
     limit_price: float | None,
     stop_price: float | None,
+    *,
+    trail_amount: float | None = None,
+    trail_percent: float | None = None,
 ) -> None:
     """Validate the static parts of an order specification.
 
     Raises:
-        OrderError: if the quantity is not a positive finite number, or if the prices
-            required by ``order_type`` are missing, non-positive or superfluous.
+        OrderError: if the quantity is not a positive finite number, if the prices
+            required by ``order_type`` are missing, non-positive or superfluous, or if a
+            trailing stop does not set exactly one of ``trail_amount`` (``> 0``) and
+            ``trail_percent`` (in ``(0, 1)``).
     """
     if not math.isfinite(quantity) or quantity <= 0:
         raise OrderError(f"order quantity must be a positive finite number, got {quantity!r}")
@@ -98,6 +120,15 @@ def validate_order_spec(
             raise OrderError(f"{order_type.value} orders must not set {name}")
         if price is not None and (not math.isfinite(price) or price <= 0):
             raise OrderError(f"{name} must be a positive finite number, got {price!r}")
+    if order_type is OrderType.TRAILING_STOP:
+        if (trail_amount is None) == (trail_percent is None):
+            raise OrderError("trailing stops need exactly one of trail_amount and trail_percent")
+        if trail_amount is not None and not (math.isfinite(trail_amount) and trail_amount > 0):
+            raise OrderError(f"trail_amount must be positive, got {trail_amount!r}")
+        if trail_percent is not None and not 0 < trail_percent < 1:
+            raise OrderError(f"trail_percent must be in (0, 1), got {trail_percent!r}")
+    elif trail_amount is not None or trail_percent is not None:
+        raise OrderError(f"{order_type.value} orders must not set a trail")
 
 
 @dataclass(slots=True)
@@ -107,6 +138,11 @@ class Order:
     Orders are created by the broker from an approved
     :class:`~backtester.events.OrderEvent`; the broker is the only component that
     mutates them.
+
+    Linked orders: an order with a ``parent_id`` is an exit of a bracket. It is not
+    ``armed`` (cannot fill) until its parent - the entry - has filled, and it works for
+    the quantity the entry opened. Orders sharing an ``oco_group`` are one-cancels-
+    other: the first fill of any of them cancels the rest.
     """
 
     id: int
@@ -124,9 +160,33 @@ class Order:
     status: OrderStatus = OrderStatus.NEW
     triggered: bool = False
     closed_at: pd.Timestamp | None = field(default=None)
+    trail_amount: float | None = None
+    trail_percent: float | None = None
+    trail_reference: float = math.nan
+    """Best price since activation: the high for sell trailing stops, the low for buys."""
+    parent_id: int | None = None
+    oco_group: int | None = None
+    armed: bool = True
 
     def __post_init__(self) -> None:
-        validate_order_spec(self.quantity, self.order_type, self.limit_price, self.stop_price)
+        validate_order_spec(
+            self.quantity,
+            self.order_type,
+            self.limit_price,
+            self.stop_price,
+            trail_amount=self.trail_amount,
+            trail_percent=self.trail_percent,
+        )
+
+    def trail_level(self, reference: float | None = None) -> float:
+        """Stop level of a trailing stop for ``reference`` (default: its own)."""
+        ref = self.trail_reference if reference is None else reference
+        if self.trail_percent is not None:
+            sign = -1.0 if self.side is Side.SELL else 1.0
+            return ref * (1.0 + sign * self.trail_percent)
+        if self.trail_amount is None:
+            raise OrderError(f"order {self.id} is not a trailing stop")
+        return ref - self.trail_amount if self.side is Side.SELL else ref + self.trail_amount
 
     @property
     def remaining(self) -> float:
