@@ -19,7 +19,7 @@ from backtester.analytics.report import num, pct, table
 from backtester.config import BacktestConfig
 from backtester.data.feed import DataFeed
 from backtester.data.loaders import load_csv, save_csv
-from backtester.data.synthetic import TRADING_DAYS, generate_ohlcv
+from backtester.data.synthetic import TRADING_DAYS, generate_multi_asset, generate_ohlcv
 from backtester.errors import BacktesterError, ConfigError
 from backtester.execution.commission import BpsCommission, CommissionModel, PerShareCommission
 from backtester.execution.slippage import FixedBpsSlippage, SlippageModel, SquareRootImpactSlippage
@@ -79,6 +79,13 @@ def _make_strategy(name: str, params: dict[str, Any]) -> TargetWeightStrategy:
 def _add_data_args(p: argparse.ArgumentParser) -> None:
     g = p.add_argument_group("data")
     g.add_argument("--csv", type=Path, help="CSV file (long format) or directory of CSVs")
+    g.add_argument(
+        "--universe",
+        choices=("single", "multi"),
+        default="single",
+        help="synthetic market: one market factor (default), or 6 equities, 4 bonds and "
+        "4 commodities with independent factors (ignores --symbols)",
+    )
     g.add_argument("--symbols", type=int, default=5, help="synthetic symbols (default 5)")
     g.add_argument("--years", type=float, default=10.0, help="synthetic years (default 10)")
     g.add_argument("--seed", type=int, default=42, help="synthetic data seed (default 42)")
@@ -203,12 +210,16 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _synthetic_frames(args: argparse.Namespace) -> dict[str, pd.DataFrame]:
+    if args.universe == "multi":
+        return generate_multi_asset(args.years, args.seed, missing_prob=args.missing_prob)
+    return generate_ohlcv(args.symbols, args.years, args.seed, missing_prob=args.missing_prob)
+
+
 def _load_feed(args: argparse.Namespace) -> DataFeed:
     if args.csv is not None:
         return DataFeed(load_csv(args.csv))
-    return DataFeed(
-        generate_ohlcv(args.symbols, args.years, args.seed, missing_prob=args.missing_prob)
-    )
+    return DataFeed(_synthetic_frames(args))
 
 
 def _config(args: argparse.Namespace) -> BacktestConfig:
@@ -410,7 +421,7 @@ def _cmd_walkforward(args: argparse.Namespace) -> int:
 
 
 def _cmd_generate(args: argparse.Namespace) -> int:
-    frames = generate_ohlcv(args.symbols, args.years, args.seed, missing_prob=args.missing_prob)
+    frames = _synthetic_frames(args)
     path = save_csv(frames, args.out)
     n = sum(len(f) for f in frames.values())
     print(f"Wrote {n} rows for {len(frames)} symbols to {path}")

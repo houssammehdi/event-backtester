@@ -165,3 +165,14 @@ def test_run_allocation_strategy(capsys: pytest.CaptureFixture[str]) -> None:
     out = capsys.readouterr().out
     assert "Strategy: allocation" in out
     assert "method=erc" in out
+
+
+def test_multi_asset_universe(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    assert (
+        main(["run", "-s", "allocation", "-p", "method=iv", "--universe", "multi", "--years", "2"])
+        == 0
+    )
+    assert "14 symbols" in capsys.readouterr().out
+    csv = tmp_path / "multi.csv"
+    assert main(["generate", "--universe", "multi", "--years", "1", "--out", str(csv)]) == 0
+    assert "for 14 symbols" in capsys.readouterr().out

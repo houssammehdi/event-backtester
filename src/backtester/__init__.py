@@ -10,7 +10,15 @@ The public API is re-exported here::
     print(result.report())
 """
 
-from backtester.data import Bar, DataFeed, MarketView, generate_market, generate_ohlcv, load_csv
+from backtester.data import (
+    Bar,
+    DataFeed,
+    MarketView,
+    generate_market,
+    generate_multi_asset,
+    generate_ohlcv,
+    load_csv,
+)
 from backtester.engine import BacktestResult, Engine
 from backtester.errors import (
     AccountingError,
@@ -89,6 +97,7 @@ __all__ = [
     "VectorizedStrategy",
     "__version__",
     "generate_market",
+    "generate_multi_asset",
     "generate_ohlcv",
     "load_csv",
 ]

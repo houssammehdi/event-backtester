@@ -3,7 +3,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from backtester import ConfigError, DataFeed, generate_market, generate_ohlcv
+from backtester import ConfigError, DataFeed, generate_market, generate_multi_asset, generate_ohlcv
 from backtester.data import SyntheticConfig
 
 
@@ -71,3 +71,24 @@ def test_config_validation(kwargs: dict[str, object]) -> None:
 def test_unknown_override_is_rejected() -> None:
     with pytest.raises(ConfigError, match="unknown"):
         generate_ohlcv(2, 1, seed=1, not_a_field=3)
+
+
+def test_multi_asset_universe_has_block_correlation() -> None:
+    frames = generate_multi_asset(years=4, seed=3)
+    assert list(frames) == [f"{p}{i:02d}" for p, n in (("EQ", 6), ("BD", 4), ("CM", 4))
+                            for i in range(1, n + 1)]  # fmt: skip
+    feed = DataFeed(frames)
+    r = np.diff(np.log(feed.last_close), axis=0)
+    corr = np.corrcoef(r.T)
+    within = [corr[:6, :6], corr[6:10, 6:10], corr[10:, 10:]]
+    assert min(c[np.triu_indices(len(c), 1)].mean() for c in within) > 0.4
+    assert abs(corr[:6, 6:].mean()) < 0.1  # classes are driven by independent factors
+    vol = r.std(axis=0) * np.sqrt(252)
+    assert vol[6:10].max() < 0.5 * vol[:6].min()  # bonds are much calmer
+    again = generate_multi_asset(years=4, seed=3)
+    assert all(frames[s].equals(again[s]) for s in frames)
+    assert not frames["EQ01"].equals(generate_multi_asset(years=4, seed=4)["EQ01"])
+    small = generate_multi_asset(years=1, seed=1, n_per_class=(2, 0, 1), missing_prob=0.05)
+    assert sorted(small) == ["CM01", "EQ01", "EQ02"]
+    with pytest.raises(ConfigError, match="at least one"):
+        generate_multi_asset(n_per_class=(0, 0, 0))

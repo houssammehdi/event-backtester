@@ -221,3 +221,76 @@ def generate_ohlcv(
             raise ConfigError(f"unknown synthetic config fields: {sorted(unknown)}")
         cfg = replace(cfg, **overrides)  # type: ignore[arg-type]
     return generate_market(cfg).frames
+
+
+ASSET_CLASSES: dict[str, SyntheticConfig] = {
+    "EQ": SyntheticConfig(
+        regimes=(Regime(0.10, 0.15), Regime(-0.20, 0.30)),
+        beta_range=(0.8, 1.2),
+        idio_volatility=0.12,
+        idio_drifts=(0.04, -0.04),
+    ),
+    "BD": SyntheticConfig(
+        regimes=(Regime(0.035, 0.05), Regime(0.0, 0.08)),
+        beta_range=(0.7, 1.3),
+        idio_volatility=0.02,
+        idio_drifts=(0.01, -0.01),
+        jump_intensity=0.2,
+        jump_mean=0.0,
+        jump_std=0.01,
+        idio_jump_intensity=0.1,
+        start_price_range=(80.0, 120.0),
+    ),
+    "CM": SyntheticConfig(
+        regimes=(Regime(0.06, 0.20), Regime(-0.08, 0.32)),
+        beta_range=(0.5, 1.5),
+        idio_volatility=0.20,
+        idio_drifts=(0.08, -0.08),
+    ),
+}
+"""Asset-class templates of :func:`generate_multi_asset` (equities, bonds, commodities)."""
+
+
+def generate_multi_asset(
+    years: float = 10.0,
+    seed: int | None = 42,
+    *,
+    n_per_class: tuple[int, int, int] = (6, 4, 4),
+    missing_prob: float = 0.0,
+) -> dict[str, pd.DataFrame]:
+    """A multi-asset universe: equities, bonds and commodities.
+
+    Each class (see :data:`ASSET_CLASSES`) has its own regime-switching market factor,
+    independent of the others, so assets are strongly correlated within a class and
+    uncorrelated across classes, and bonds are several times less volatile than the
+    rest. That block structure is what risk-based allocation (inverse volatility,
+    minimum variance, risk parity, HRP) is designed for, and what the single-factor
+    :func:`generate_ohlcv` market lacks. Symbols are ``EQ01..``, ``BD01..``, ``CM01..``.
+
+    Args:
+        years: Length in years of 252 bars.
+        seed: Base seed (each class gets an independent stream derived from it).
+        n_per_class: Number of equities, bonds and commodities.
+        missing_prob: Probability that a (bar, symbol) is dropped (missing data).
+    """
+    n_bars = max(round(years * TRADING_DAYS), 2)
+    streams = np.random.SeedSequence(seed).spawn(len(ASSET_CLASSES))
+    frames: dict[str, pd.DataFrame] = {}
+    for (prefix, template), count, stream in zip(
+        ASSET_CLASSES.items(), n_per_class, streams, strict=True
+    ):
+        if count < 1:
+            continue
+        class_seed = int(stream.generate_state(1)[0]) if seed is not None else None
+        cfg = replace(
+            template,
+            n_symbols=count,
+            n_bars=n_bars,
+            seed=class_seed,
+            symbol_prefix=prefix,
+            missing_prob=missing_prob,
+        )
+        frames.update(generate_market(cfg).frames)
+    if not frames:
+        raise ConfigError("n_per_class must include at least one asset")
+    return frames
