@@ -19,7 +19,7 @@ long-only weights that sum to one:
   bisection of that order with inverse-variance allocation inside each half.
 
 :class:`Allocator` wraps a method with a covariance estimator so that a strategy can
-call it on a window of returns.
+call it on a window of returns (see :class:`backtester.strategies.AllocationStrategy`).
 
 References:
     Lopez de Prado, M. (2016). Building diversified portfolios that outperform out of

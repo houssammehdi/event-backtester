@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from backtester.strategies.allocation import AllocationStrategy
 from backtester.strategies.bollinger import BollingerMeanReversion
 from backtester.strategies.sma_crossover import SmaCrossover
 from backtester.strategies.tsmom import TimeSeriesMomentum
@@ -13,10 +14,12 @@ STRATEGIES: dict[str, type[TargetWeightStrategy]] = {
     TimeSeriesMomentum.name: TimeSeriesMomentum,
     CrossSectionalMomentum.name: CrossSectionalMomentum,
     BollingerMeanReversion.name: BollingerMeanReversion,
+    AllocationStrategy.name: AllocationStrategy,
 }
 
 __all__ = [
     "STRATEGIES",
+    "AllocationStrategy",
     "BollingerMeanReversion",
     "CrossSectionalMomentum",
     "SmaCrossover",

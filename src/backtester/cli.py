@@ -35,6 +35,7 @@ DEFAULT_GRIDS: dict[str, dict[str, list[Any]]] = {
     "tsmom": {"lookback": [63, 126, 252], "target_vol": [0.10, 0.20]},
     "xsmom": {"lookback": [63, 126, 252], "top_k": [1, 2]},
     "bollinger": {"window": [10, 20, 40], "n_std": [1.5, 2.0, 2.5]},
+    "allocation": {"method": ["ew", "iv", "minvar", "erc", "hrp"], "lookback": [126, 252]},
 }
 
 

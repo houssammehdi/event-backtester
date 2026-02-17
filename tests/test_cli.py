@@ -157,3 +157,11 @@ def test_plot_option_writes_png(tmp_path: Path) -> None:
     ]
     assert main(args) == 0
     assert wf.exists()
+
+
+def test_run_allocation_strategy(capsys: pytest.CaptureFixture[str]) -> None:
+    args = ["run", "-s", "allocation", "-p", "method=erc", "-p", "lookback=126", "--years", "2"]
+    assert main(args) == 0
+    out = capsys.readouterr().out
+    assert "Strategy: allocation" in out
+    assert "method=erc" in out

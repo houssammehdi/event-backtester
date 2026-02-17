@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from abc import abstractmethod
-from typing import Literal
+from typing import ClassVar, Literal
 
 import numpy as np
 import numpy.typing as npt
@@ -35,7 +35,17 @@ class TargetWeightStrategy(VectorizedStrategy):
     The first bar with valid weights is always a rebalance. When a backtest starts
     after a warm-up period, the most recently scheduled weights are established on the
     first trading bar.
+
+    Subclasses whose weights depend only on the trailing window - no state carried from
+    bar to bar - may set :attr:`stateless`. With the monthly schedule both paths then
+    evaluate :meth:`desired_weights` only on bars where a rebalance can be due (every
+    bar until the first valid weights, then the first bar of each month). The decisions
+    are the same; on daily data the rule is evaluated about 20 times less often, which
+    matters for expensive rules such as portfolio optimisers.
     """
+
+    stateless: ClassVar[bool] = False
+    """True if :meth:`desired_weights` is a pure function of its window."""
 
     def __init__(self, rebalance: Rebalance) -> None:
         if rebalance not in ("daily", "monthly", "change"):
@@ -54,8 +64,8 @@ class TargetWeightStrategy(VectorizedStrategy):
     def desired_weights(self, closes: FloatArray) -> FloatArray | None:
         """Weights for the latest row of ``closes`` (forward-filled, oldest first).
 
-        Return ``None`` while there is not enough history. Called on every bar in order,
-        so implementations may keep state.
+        Return ``None`` while there is not enough history. Called on every bar in order
+        (unless :attr:`stateless`), so implementations may keep state.
         """
 
     @abstractmethod
@@ -65,13 +75,14 @@ class TargetWeightStrategy(VectorizedStrategy):
     # ------------------------------------------------------------------ event path
     def on_bar(self, view: MarketView, ctx: StrategyContext) -> None:
         """Compute weights, decide whether a rebalance is due and emit the target."""
-        weights = self.desired_weights(view.filled_closes(self.history_bars))
         due = False
-        if weights is not None:
-            due = self._is_due(view, weights)
-            if due:
-                self._scheduled = weights
-            self._previous = weights
+        if not self._skip(view):
+            weights = self.desired_weights(view.filled_closes(self.history_bars))
+            if weights is not None:
+                due = self._is_due(view, weights)
+                if due:
+                    self._scheduled = weights
+                self._previous = weights
         if ctx.is_warmup or self._scheduled is None:
             return
         if due or not self._emitted:
@@ -80,22 +91,54 @@ class TargetWeightStrategy(VectorizedStrategy):
             )
             self._emitted = True
 
+    def _skip(self, view: MarketView) -> bool:
+        """Whether a stateless monthly strategy can skip this bar entirely."""
+        return (
+            self.stateless
+            and self.rebalance == "monthly"
+            and self._previous is not None
+            and not self._month_changed(view)
+        )
+
+    @staticmethod
+    def _month_changed(view: MarketView) -> bool:
+        index = view.index
+        if len(index) < 2:
+            return True
+        now, before = index[-1], index[-2]
+        return bool((now.year, now.month) != (before.year, before.month))
+
     def _is_due(self, view: MarketView, weights: FloatArray) -> bool:
         if self._previous is None or self.rebalance == "daily":
             return True
         if self.rebalance == "monthly":
-            index = view.index
-            if len(index) < 2:
-                return True
-            now, before = index[-1], index[-2]
-            return (now.year, now.month) != (before.year, before.month)
+            return self._month_changed(view)
         return not np.array_equal(weights, self._previous)
 
     # ------------------------------------------------------------------ vectorized path
+    def _desired_on_candidates(self, closes: pd.DataFrame) -> pd.DataFrame:
+        """Desired weights on the rows where a monthly rebalance can be due, else NaN."""
+        values = closes.to_numpy(dtype=np.float64)
+        periods = pd.DatetimeIndex(closes.index).to_period("M")
+        month_change = np.r_[True, periods[1:] != periods[:-1]]
+        out = np.full(values.shape, np.nan)
+        found = False
+        for t in range(len(values)):
+            if found and not month_change[t]:
+                continue
+            weights = self.desired_weights(values[max(0, t + 1 - self.history_bars) : t + 1])
+            if weights is not None:
+                out[t] = weights
+                found = True
+        return pd.DataFrame(out, index=closes.index, columns=closes.columns)
+
     def target_weights_frame(self, feed: DataFeed) -> pd.DataFrame:
         """Scheduled target weights per bar; NaN rows mean *hold, do not rebalance*."""
         closes = pd.DataFrame(feed.last_close.copy(), index=feed.index, columns=feed.symbols)
-        desired = self.desired_weights_frame(closes)
+        if self.stateless and self.rebalance == "monthly":
+            desired = self._desired_on_candidates(closes)
+        else:
+            desired = self.desired_weights_frame(closes)
         valid = desired.notna().all(axis=1).to_numpy()
         first_valid = np.zeros(len(desired), dtype=bool)
         if valid.any():
