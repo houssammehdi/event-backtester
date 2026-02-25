@@ -5,11 +5,12 @@ implement :class:`~backtester.strategy.VectorizedStrategy` - without an event qu
 order objects or per-bar Python callbacks:
 
 * weights decided at the close of bar ``t`` are sized with equity and closes of ``t``
-  and executed at the open of ``t + 1`` (market orders, fractional quantities);
+  and executed at the open of ``t + 1`` (market orders, fractional quantities) - or,
+  with ``execution="close"``, at the close of ``t + 1`` (market-on-close orders);
 * between rebalances holdings are constant, so equity for the whole block is a single
   matrix product ``cash + closes @ shares``;
-* costs are a fixed adverse slippage in bps of the open plus a commission in bps of
-  traded notional - the same as ``FixedBpsSlippage`` + ``BpsCommission``.
+* costs are a fixed adverse slippage in bps of the execution price plus a commission
+  in bps of traded notional - the same as ``FixedBpsSlippage`` + ``BpsCommission``.
 
 The loop runs over rebalance dates only (monthly strategies: ~12 iterations per year).
 Features that need per-order state - limit/stop orders, participation caps, risk
@@ -20,6 +21,7 @@ check both paths agree to numerical precision where both apply.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Literal
 
 import numpy as np
 import pandas as pd
@@ -75,6 +77,7 @@ def run_vectorized(
     start: int | None = None,
     end: int | None = None,
     periods_per_year: float = 252.0,
+    execution: Literal["open", "close"] = "open",
 ) -> VectorizedResult:
     """Backtest ``strategy`` with the vectorized fast path.
 
@@ -88,9 +91,14 @@ def run_vectorized(
         start: First calendar position of the trading window (earlier rows are warm-up).
         end: Last calendar position (inclusive).
         periods_per_year: Bars per year for annualised statistics.
+        execution: Trade at the next bar's ``"open"`` (like market orders) or its
+            ``"close"`` (like market-on-close orders, i.e. ``target_order_type`` set to
+            ``MARKET_ON_CLOSE`` in the event engine).
     """
     if initial_cash <= 0 or slippage_bps < 0 or commission_bps < 0:
         raise ConfigError("initial_cash must be positive and costs non-negative")
+    if execution not in ("open", "close"):
+        raise ConfigError(f"execution must be 'open' or 'close', got {execution!r}")
     lo = _position(feed, start, 0)
     hi = _position(feed, end, len(feed) - 1)
     if lo > hi:
@@ -110,7 +118,7 @@ def run_vectorized(
             decisions.insert(0, lo)
 
     closes = feed.last_close[lo : hi + 1]
-    opens = feed.array("open")[lo : hi + 1]
+    fills = closes if execution == "close" else feed.array("open")[lo : hi + 1]
     n, m = closes.shape
     slip = slippage_bps / 10_000.0
     comm = commission_bps / 10_000.0
@@ -128,11 +136,11 @@ def run_vectorized(
         held[block:e] = shares
         target = np.nan_to_num(w[d]) * equity[k] / closes[k]
         delta = target - shares
-        price = opens[e] * (1.0 + np.sign(delta) * slip)
+        price = fills[e] * (1.0 + np.sign(delta) * slip)
         notional = np.abs(delta) * price
         fee = float(notional.sum()) * comm
         cash -= float(delta @ price) + fee
-        costs += fee + float((np.abs(delta) * opens[e] * slip).sum())
+        costs += fee + float((np.abs(delta) * fills[e] * slip).sum())
         traded[e] = float(notional.sum())
         shares = target
         block = e

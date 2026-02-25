@@ -51,7 +51,7 @@ from backtester.execution import (
 from backtester.orders import Order, OrderStatus, OrderType, Side, TimeInForce
 from backtester.portfolio import Portfolio, Position
 from backtester.risk import RiskLimits, RiskManager
-from backtester.strategy import Strategy, StrategyContext, VectorizedStrategy
+from backtester.strategy import Bracket, Strategy, StrategyContext, VectorizedStrategy
 from backtester.strategy.rebalancing import TargetWeightStrategy
 
 __version__ = "0.1.0"
@@ -62,6 +62,7 @@ __all__ = [
     "BacktesterError",
     "Bar",
     "BpsCommission",
+    "Bracket",
     "CancelEvent",
     "ConfigError",
     "DataError",

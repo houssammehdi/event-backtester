@@ -14,6 +14,8 @@ from backtester.orders import OrderType, Side, TimeInForce
 from backtester.portfolio.portfolio import Portfolio
 from backtester.portfolio.sizing import rebalance_quantities, round_to_lot, scale_to_gross
 
+_AUCTION_TYPES = frozenset({OrderType.MARKET, OrderType.MARKET_ON_OPEN, OrderType.MARKET_ON_CLOSE})
+
 
 @dataclass(frozen=True, slots=True)
 class RiskLimits:
@@ -58,10 +60,12 @@ class RiskManager:
 
     * :class:`~backtester.events.TargetEvent` weights are clipped to
       ``max_position_weight``, scaled to ``max_gross_leverage`` and translated into
-      market orders sized on the latest close and current equity.
+      market orders (or ``target_order_type``) sized on the latest close and current
+      equity.
     * :class:`~backtester.events.SignalEvent` order requests are reduced (or rejected)
       when the projected position - including already working orders - would breach a
-      limit. Requests that reduce exposure are always allowed.
+      limit. Requests that reduce exposure are always allowed. The exits of a bracket
+      are not sized: they only ever close what their entry opened.
     * The drawdown kill-switch is evaluated on every bar close.
 
     Args:
@@ -71,6 +75,8 @@ class RiskManager:
         rebalance_threshold: Skip target rebalances when the weight deviation of a
             symbol is within this band.
         min_trade_notional: Skip target trades smaller than this value.
+        target_order_type: How rebalances execute: ``MARKET`` / ``MARKET_ON_OPEN`` (the
+            next open, default) or ``MARKET_ON_CLOSE`` (the next close).
     """
 
     def __init__(
@@ -80,13 +86,17 @@ class RiskManager:
         lot_size: float | None = 1.0,
         rebalance_threshold: float = 0.0,
         min_trade_notional: float = 0.0,
+        target_order_type: OrderType = OrderType.MARKET,
     ) -> None:
         if rebalance_threshold < 0 or min_trade_notional < 0:
             raise ConfigError("rebalance_threshold and min_trade_notional must be >= 0")
+        if target_order_type not in _AUCTION_TYPES:
+            raise ConfigError("target_order_type must be MARKET, MARKET_ON_OPEN or MARKET_ON_CLOSE")
         self.limits = limits or RiskLimits()
         self.lot_size = lot_size
         self.rebalance_threshold = rebalance_threshold
         self.min_trade_notional = min_trade_notional
+        self.target_order_type = target_order_type
         self.halted = False
         self.halted_at: pd.Timestamp | None = None
         self.peak_equity = -math.inf
@@ -193,12 +203,43 @@ class RiskManager:
                     symbol=symbol,
                     side=Side.from_quantity(qty),
                     quantity=abs(qty),
+                    order_type=self.target_order_type,
                     tag="rebalance",
                 )
             )
         return events
 
     # ------------------------------------------------------------------ explicit orders
+    @staticmethod
+    def _order_event(
+        event: SignalEvent, quantity: float, prices: Mapping[str, float]
+    ) -> OrderEvent:
+        """The order for ``event`` with a (possibly clipped) signed ``quantity``.
+
+        A stand-alone trailing stop starts trailing from the decision bar's close; a
+        bracket exit starts from its entry's fill price (set by the broker).
+        """
+        reference = None
+        if event.order_type is OrderType.TRAILING_STOP and event.parent_id is None:
+            reference = prices.get(event.symbol)
+        return OrderEvent(
+            event.timestamp,
+            order_id=event.order_id,
+            symbol=event.symbol,
+            side=Side.from_quantity(quantity),
+            quantity=abs(quantity),
+            order_type=event.order_type,
+            tif=event.tif,
+            limit_price=event.limit_price,
+            stop_price=event.stop_price,
+            tag=event.tag,
+            trail_amount=event.trail_amount,
+            trail_percent=event.trail_percent,
+            trail_reference=reference,
+            oco_group=event.oco_group,
+            parent_id=event.parent_id,
+        )
+
     def review_signal(
         self,
         event: SignalEvent,
@@ -213,18 +254,7 @@ class RiskManager:
             original request so it can be logged as rejected.
         """
         ts, symbol = event.timestamp, event.symbol
-        original = OrderEvent(
-            ts,
-            order_id=event.order_id,
-            symbol=symbol,
-            side=Side.from_quantity(event.quantity),
-            quantity=abs(event.quantity),
-            order_type=event.order_type,
-            tif=event.tif,
-            limit_price=event.limit_price,
-            stop_price=event.stop_price,
-            tag=event.tag,
-        )
+        original = self._order_event(event, event.quantity, prices)
         if self.halted:
             self._note(ts, "rejected", symbol, "order rejected: kill-switch active")
             return original, False
@@ -234,19 +264,22 @@ class RiskManager:
             return original, False
         if qty != event.quantity:
             self._note(ts, "clipped", symbol, f"quantity {event.quantity:g} -> {qty:g}")
-        approved = OrderEvent(
-            ts,
-            order_id=event.order_id,
-            symbol=symbol,
-            side=Side.from_quantity(qty),
-            quantity=abs(qty),
-            order_type=event.order_type,
-            tif=event.tif,
-            limit_price=event.limit_price,
-            stop_price=event.stop_price,
-            tag=event.tag,
-        )
-        return approved, True
+        return self._order_event(event, qty, prices), True
+
+    def review_exit(
+        self, event: SignalEvent, prices: Mapping[str, float], *, entry_rejected: bool
+    ) -> tuple[OrderEvent, bool]:
+        """Review a bracket exit.
+
+        Exits are approved as they are (they only close what their entry opens) unless
+        the entry was rejected or the kill switch is active.
+        """
+        order = self._order_event(event, event.quantity, prices)
+        if self.halted or entry_rejected:
+            reason = "kill-switch active" if self.halted else "its entry was rejected"
+            self._note(event.timestamp, "rejected", event.symbol, f"exit rejected: {reason}")
+            return order, False
+        return order, True
 
     def _allowed_quantity(
         self,

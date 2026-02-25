@@ -190,6 +190,7 @@ class Engine:
         self._queue = EventQueue()
         self._view = feed.view(0)
         self._ran = False
+        self._rejected: set[int] = set()
 
     def _next_id(self) -> int:
         return next(self._ids)
@@ -327,15 +328,28 @@ class Engine:
                 self.risk.process_target(event, self.portfolio, self._view.prices(), self._next_id)
             )
         elif isinstance(event, SignalEvent):
-            pending: dict[str, float] = {}
-            for order in self.broker.open_orders(event.symbol):
-                pending[order.symbol] = pending.get(order.symbol, 0.0) + order.signed_remaining
-            order_event, approved = self.risk.review_signal(
-                event, self.portfolio, self._view.prices(), pending
-            )
+            prices = self._view.prices()
+            if event.parent_id is not None:
+                order_event, approved = self.risk.review_exit(
+                    event, prices, entry_rejected=event.parent_id in self._rejected
+                )
+            else:
+                # Working orders count towards the position limits, except exits not yet
+                # armed (they cannot fill) and alternatives in the same OCO group.
+                pending: dict[str, float] = {}
+                for order in self.broker.open_orders(event.symbol):
+                    same_group = event.oco_group is not None and order.oco_group == event.oco_group
+                    if order.armed and not same_group:
+                        pending[order.symbol] = (
+                            pending.get(order.symbol, 0.0) + order.signed_remaining
+                        )
+                order_event, approved = self.risk.review_signal(
+                    event, self.portfolio, prices, pending
+                )
             if approved:
                 self._queue.push(order_event)
             else:
+                self._rejected.add(event.order_id)
                 self.broker.record_rejection(order_event)
         elif isinstance(event, CancelEvent):
             if event.order_id is not None:

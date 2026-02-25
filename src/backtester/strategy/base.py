@@ -5,7 +5,7 @@ from __future__ import annotations
 import itertools
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterable, Mapping
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from typing import Any, ClassVar
 
 import pandas as pd
@@ -16,6 +16,17 @@ from backtester.events import CancelEvent, Event, FillEvent, SignalEvent, Target
 from backtester.execution.broker import SimulatedBroker
 from backtester.orders import Order, OrderType, TimeInForce
 from backtester.portfolio.portfolio import Portfolio
+
+
+@dataclass(frozen=True, slots=True)
+class Bracket:
+    """Order ids of a bracket (see :meth:`StrategyContext.bracket`)."""
+
+    entry: int
+    stop_loss: int | None
+    """Protective stop (fixed or trailing), if any."""
+    take_profit: int | None
+    """Profit target, if any."""
 
 
 class StrategyContext:
@@ -123,10 +134,28 @@ class StrategyContext:
         *,
         limit_price: float | None = None,
         stop_price: float | None = None,
+        trail_amount: float | None = None,
+        trail_percent: float | None = None,
         tif: TimeInForce = TimeInForce.DAY,
+        oco_group: int | None = None,
         tag: str = "",
     ) -> int:
-        """Request an order for a signed ``quantity``; returns the order id."""
+        """Request an order for a signed ``quantity``; returns the order id.
+
+        Args:
+            symbol: Symbol to trade.
+            quantity: Signed quantity (positive buys, negative sells).
+            order_type: See :class:`~backtester.orders.OrderType`.
+            limit_price: Limit of ``LIMIT`` and ``STOP_LIMIT`` orders.
+            stop_price: Stop of ``STOP`` and ``STOP_LIMIT`` orders.
+            trail_amount: Absolute trail of a ``TRAILING_STOP`` (e.g. ``2.5``).
+            trail_percent: Relative trail of a ``TRAILING_STOP`` (e.g. ``0.05``); it
+                starts trailing from this bar's close.
+            tif: Time in force.
+            oco_group: Id from :meth:`oco_group`; the first fill in a group cancels the
+                other orders of the group.
+            tag: Free-form label kept on the order.
+        """
         self._check_symbol(symbol)
         order_id = self._next_id()
         self._events.append(
@@ -140,6 +169,130 @@ class StrategyContext:
                 limit_price=limit_price,
                 stop_price=stop_price,
                 tag=tag,
+                trail_amount=trail_amount,
+                trail_percent=trail_percent,
+                oco_group=oco_group,
+            )
+        )
+        return order_id
+
+    def oco_group(self) -> int:
+        """A new one-cancels-other group id to pass to :meth:`order`."""
+        return self._next_id()
+
+    def bracket(
+        self,
+        symbol: str,
+        quantity: float,
+        entry_type: OrderType = OrderType.MARKET,
+        *,
+        limit_price: float | None = None,
+        stop_price: float | None = None,
+        stop_loss: float | None = None,
+        take_profit: float | None = None,
+        trail_amount: float | None = None,
+        trail_percent: float | None = None,
+        tif: TimeInForce = TimeInForce.DAY,
+        exit_tif: TimeInForce = TimeInForce.GTC,
+        tag: str = "",
+    ) -> Bracket:
+        """Request an entry with a protective stop and/or a profit target.
+
+        The exits are armed when the entry fills and work for the quantity it opened;
+        the first exit to fill reduces the other by the same amount and ends any
+        unfilled part of the entry; if the entry never fills, both are cancelled. When
+        the stop and the target both trade inside one bar, the broker's ``intrabar``
+        policy decides which came first (by default the stop: the worst case).
+
+        Args:
+            symbol: Symbol to trade.
+            quantity: Signed entry quantity (positive opens a long).
+            entry_type: Order type of the entry (default market).
+            limit_price: Entry limit (limit and stop-limit entries).
+            stop_price: Entry stop (stop and stop-limit entries).
+            stop_loss: Stop price of the protective exit (below the entry for a long).
+            take_profit: Limit price of the profit target (above the entry for a long).
+            trail_amount: Make the protective exit a trailing stop with this trail...
+            trail_percent: ...or with this relative trail, starting from the entry's
+                fill price.
+            tif: Time in force of the entry.
+            exit_tif: Time in force of the exits once armed (default GTC).
+            tag: Label of the entry; the exits get ``stop_loss`` / ``take_profit``.
+
+        Returns:
+            The order ids of the entry and the exits.
+        """
+        trailing = trail_amount is not None or trail_percent is not None
+        if stop_loss is None and take_profit is None and not trailing:
+            raise OrderError("a bracket needs a stop_loss, a trail or a take_profit")
+        if stop_loss is not None and trailing:
+            raise OrderError("give either a fixed stop_loss or a trail, not both")
+        if stop_loss is not None and take_profit is not None:
+            ordered = stop_loss < take_profit if quantity > 0 else stop_loss > take_profit
+            if not ordered:
+                side = "below" if quantity > 0 else "above"
+                raise OrderError(f"stop_loss must be {side} take_profit")
+        entry = self.order(
+            symbol,
+            quantity,
+            entry_type,
+            limit_price=limit_price,
+            stop_price=stop_price,
+            tif=tif,
+            tag=tag,
+        )
+        prefix = f"{tag}:" if tag else ""
+        protect: int | None = None
+        if stop_loss is not None or trailing:
+            protect = self._exit(
+                symbol,
+                -quantity,
+                OrderType.STOP if stop_loss is not None else OrderType.TRAILING_STOP,
+                entry,
+                exit_tif,
+                f"{prefix}stop_loss",
+                stop_price=stop_loss,
+                trail_amount=trail_amount,
+                trail_percent=trail_percent,
+            )
+        target: int | None = None
+        if take_profit is not None:
+            target = self._exit(
+                symbol,
+                -quantity,
+                OrderType.LIMIT,
+                entry,
+                exit_tif,
+                f"{prefix}take_profit",
+                limit_price=take_profit,
+            )
+        return Bracket(entry=entry, stop_loss=protect, take_profit=target)
+
+    def _exit(
+        self,
+        symbol: str,
+        quantity: float,
+        order_type: OrderType,
+        parent_id: int,
+        tif: TimeInForce,
+        tag: str,
+        **prices: float | None,
+    ) -> int:
+        order_id = self._next_id()
+        self._events.append(
+            SignalEvent(
+                self.timestamp,
+                order_id=order_id,
+                symbol=symbol,
+                quantity=quantity,
+                order_type=order_type,
+                tif=tif,
+                tag=tag,
+                parent_id=parent_id,
+                limit_price=prices.get("limit_price"),
+                stop_price=prices.get("stop_price"),
+                trail_amount=prices.get("trail_amount"),
+                trail_percent=prices.get("trail_percent"),
             )
         )
         return order_id
