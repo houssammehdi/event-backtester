@@ -176,3 +176,19 @@ def test_multi_asset_universe(tmp_path: Path, capsys: pytest.CaptureFixture[str]
     csv = tmp_path / "multi.csv"
     assert main(["generate", "--universe", "multi", "--years", "1", "--out", str(csv)]) == 0
     assert "for 14 symbols" in capsys.readouterr().out
+
+
+def test_closed_stdout_exits_quietly() -> None:
+    """Regression: `backtest ... | head` printed a BrokenPipeError traceback."""
+    import subprocess
+    import sys
+
+    cmd = [sys.executable, "-m", "backtester.cli", "strategies"]
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    assert proc.stdout is not None
+    assert proc.stderr is not None
+    proc.stdout.close()  # the reader goes away before the first write
+    with proc.stderr:
+        stderr = proc.stderr.read().decode()
+    assert proc.wait() == 141  # 128 + SIGPIPE, like other command-line tools
+    assert "Traceback" not in stderr

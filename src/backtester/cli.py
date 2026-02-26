@@ -5,6 +5,8 @@ from __future__ import annotations
 import argparse
 import ast
 import inspect
+import os
+import signal
 import sys
 import time
 from collections.abc import Sequence
@@ -454,6 +456,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     except BacktesterError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
+    except BrokenPipeError:
+        # The reader went away (``backtest ... | head``): stop quietly like other
+        # command-line tools. Point stdout at devnull so that the interpreter's final
+        # flush does not raise again.
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull, sys.stdout.fileno())
+        return 128 + signal.SIGPIPE
 
 
 if __name__ == "__main__":  # pragma: no cover
