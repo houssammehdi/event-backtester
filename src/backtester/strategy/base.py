@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import copy
 import itertools
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterable, Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import Any, ClassVar
 
 import pandas as pd
@@ -113,7 +114,7 @@ class StrategyContext:
 
     def open_orders(self, symbol: str | None = None) -> list[Order]:
         """Snapshots (copies) of working orders."""
-        return [replace(o) for o in self._broker.open_orders(symbol)]
+        return [copy.copy(o) for o in self._broker.open_orders(symbol)]
 
     # ------------------------------------------------------------------ actions
     def target_weights(self, weights: Mapping[str, float], *, partial: bool = False) -> None:

@@ -89,6 +89,22 @@ _TERMINAL = frozenset(
 )
 
 
+AUCTION_TYPES = frozenset({OrderType.MARKET, OrderType.MARKET_ON_OPEN, OrderType.MARKET_ON_CLOSE})
+"""Order types that execute in an auction (the open or the close), not at a price."""
+_NEEDS_LIMIT = frozenset({OrderType.LIMIT, OrderType.STOP_LIMIT})
+_NEEDS_STOP = frozenset({OrderType.STOP, OrderType.STOP_LIMIT})
+
+
+def _check_price(name: str, price: float | None, needed: bool, order_type: OrderType) -> None:
+    if price is None:
+        if needed:
+            raise OrderError(f"{order_type.value} orders require {name}")
+    elif not needed:
+        raise OrderError(f"{order_type.value} orders must not set {name}")
+    elif not math.isfinite(price) or price <= 0:
+        raise OrderError(f"{name} must be a positive finite number, got {price!r}")
+
+
 def validate_order_spec(
     quantity: float,
     order_type: OrderType,
@@ -108,18 +124,16 @@ def validate_order_spec(
     """
     if not math.isfinite(quantity) or quantity <= 0:
         raise OrderError(f"order quantity must be a positive finite number, got {quantity!r}")
-    needs_limit = order_type in (OrderType.LIMIT, OrderType.STOP_LIMIT)
-    needs_stop = order_type in (OrderType.STOP, OrderType.STOP_LIMIT)
-    for name, price, needed in (
-        ("limit_price", limit_price, needs_limit),
-        ("stop_price", stop_price, needs_stop),
+    if (
+        order_type in AUCTION_TYPES
+        and limit_price is None
+        and stop_price is None
+        and trail_amount is None
+        and trail_percent is None
     ):
-        if needed and price is None:
-            raise OrderError(f"{order_type.value} orders require {name}")
-        if not needed and price is not None:
-            raise OrderError(f"{order_type.value} orders must not set {name}")
-        if price is not None and (not math.isfinite(price) or price <= 0):
-            raise OrderError(f"{name} must be a positive finite number, got {price!r}")
+        return  # the common case, checked on every order and event
+    _check_price("limit_price", limit_price, order_type in _NEEDS_LIMIT, order_type)
+    _check_price("stop_price", stop_price, order_type in _NEEDS_STOP, order_type)
     if order_type is OrderType.TRAILING_STOP:
         if (trail_amount is None) == (trail_percent is None):
             raise OrderError("trailing stops need exactly one of trail_amount and trail_percent")
@@ -177,6 +191,34 @@ class Order:
             trail_amount=self.trail_amount,
             trail_percent=self.trail_percent,
         )
+
+    def __copy__(self) -> Order:
+        # ``copy.copy`` of a slots dataclass goes through ``__reduce_ex__``; the broker
+        # copies every working order of a symbol whose fills depend on the intrabar
+        # path, so this spells the copy out (tests check that it covers every field).
+        clone = object.__new__(Order)
+        clone.id = self.id
+        clone.symbol = self.symbol
+        clone.side = self.side
+        clone.quantity = self.quantity
+        clone.order_type = self.order_type
+        clone.created_at = self.created_at
+        clone.tif = self.tif
+        clone.limit_price = self.limit_price
+        clone.stop_price = self.stop_price
+        clone.tag = self.tag
+        clone.filled_quantity = self.filled_quantity
+        clone.avg_fill_price = self.avg_fill_price
+        clone.status = self.status
+        clone.triggered = self.triggered
+        clone.closed_at = self.closed_at
+        clone.trail_amount = self.trail_amount
+        clone.trail_percent = self.trail_percent
+        clone.trail_reference = self.trail_reference
+        clone.parent_id = self.parent_id
+        clone.oco_group = self.oco_group
+        clone.armed = self.armed
+        return clone
 
     def trail_level(self, reference: float | None = None) -> float:
         """Stop level of a trailing stop for ``reference`` (default: its own)."""

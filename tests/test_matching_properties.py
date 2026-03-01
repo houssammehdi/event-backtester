@@ -14,7 +14,7 @@ from hypothesis import strategies as st
 from backtester import OrderEvent, OrderStatus, OrderType, Side, SimulatedBroker, TimeInForce
 from backtester.data import Bar, DataFeed
 from backtester.execution import NoCommission, NoSlippage
-from backtester.execution.matching import BarSimulation, path_points
+from backtester.execution.matching import BarSimulation, idle_on_bar, path_points
 from backtester.orders import Order
 
 T0 = pd.Timestamp("2024-01-01")
@@ -30,12 +30,17 @@ def ohlc(draw: st.DrawFn) -> Bar:
     return Bar(T1, "A", round(o, 2), round(h, 2), round(lo, 2), round(c, 2), 1e6)
 
 
-def simulate(orders: list[Order], bar: Bar, high_first: bool) -> BarSimulation:
+def simulate(
+    orders: list[Order],
+    bar: Bar,
+    high_first: bool,
+    children: dict[int, list[int]] | None = None,
+) -> BarSimulation:
     by_id = {o.id: o for o in orders}
     sim = BarSimulation(
         orders,
         by_id.__getitem__,
-        {},
+        children or {},
         bar,
         high_first=high_first,
         capacity=math.inf,
@@ -204,3 +209,94 @@ def test_worst_case_is_never_better_than_either_path(
         assert exits.count(OrderStatus.FILLED) <= 1  # never both exits
     assert values["worst"] <= min(values["high_first"], values["low_first"]) + 1e-9
     assert values["best"] >= max(values["high_first"], values["low_first"]) - 1e-9
+
+
+@settings(max_examples=200, deadline=None)
+@given(
+    bar=ohlc(),
+    specs=st.lists(
+        st.tuples(
+            st.sampled_from([OrderType.LIMIT, OrderType.STOP]),
+            st.sampled_from([Side.BUY, Side.SELL]),
+            st.floats(0.01, 5),
+            st.lists(st.sampled_from(list(OrderType)), max_size=2),
+            st.booleans(),
+        ),
+        min_size=1,
+        max_size=4,
+    ),
+)
+def test_idle_orders_do_nothing_on_either_path(
+    bar: Bar,
+    specs: list[tuple[OrderType, Side, float, list[OrderType], bool]],
+) -> None:
+    """The broker skips a symbol whose orders are all idle; simulating it would be a no-op.
+
+    Each entry is a limit or stop the bar does not reach, with unarmed exits of any type
+    and possibly an OCO group.
+    """
+
+    def make() -> tuple[list[Order], dict[int, list[int]]]:
+        orders: list[Order] = []
+        children: dict[int, list[int]] = {}
+        for kind, side, gap, exit_types, oco in specs:
+            beyond_high = (kind is OrderType.LIMIT) is (side is Side.SELL)
+            price = round(bar.high + gap if beyond_high else bar.low - gap, 2)
+            key = "limit_price" if kind is OrderType.LIMIT else "stop_price"
+            entry = Order(
+                len(orders) + 1,
+                "A",
+                side,
+                5.0,
+                kind,
+                T0,
+                TimeInForce.GTC,
+                oco_group=1 if oco else None,
+                **{key: price},
+            )
+            orders.append(entry)
+            for exit_type in exit_types:
+                prices: dict[str, float] = {}
+                if exit_type in (OrderType.LIMIT, OrderType.STOP_LIMIT):
+                    prices["limit_price"] = 100.0
+                if exit_type in (OrderType.STOP, OrderType.STOP_LIMIT):
+                    prices["stop_price"] = 100.0
+                if exit_type is OrderType.TRAILING_STOP:
+                    prices["trail_percent"] = 0.01
+                exit_order = Order(
+                    len(orders) + 1,
+                    "A",
+                    Side.SELL if side is Side.BUY else Side.BUY,
+                    5.0,
+                    exit_type,
+                    T0,
+                    TimeInForce.GTC,
+                    parent_id=entry.id,
+                    armed=False,
+                    **prices,
+                )
+                orders.append(exit_order)
+                children.setdefault(entry.id, []).append(exit_order.id)
+        return orders, children
+
+    reference, _ = make()
+    assert all(idle_on_bar(o, bar) for o in reference)
+    for high_first in (True, False):
+        orders, children = make()
+        assert simulate(orders, bar, high_first, children).fills == []
+        assert orders == reference
+
+
+def test_orders_the_bar_reaches_are_not_idle() -> None:
+    bar = Bar(T1, "A", 100.0, 104.0, 97.0, 101.0, 1e6)
+
+    def order(side: Side, kind: OrderType, price: float, **kw: object) -> Order:
+        key = "limit_price" if kind is OrderType.LIMIT else "stop_price"
+        return Order(1, "A", side, 1.0, kind, T0, **{key: price}, **kw)  # type: ignore[arg-type]
+
+    assert not idle_on_bar(order(Side.BUY, OrderType.LIMIT, 97.0), bar)  # touches the low
+    assert not idle_on_bar(order(Side.SELL, OrderType.STOP, 97.0), bar)
+    assert not idle_on_bar(order(Side.BUY, OrderType.STOP, 104.0), bar)
+    assert idle_on_bar(order(Side.BUY, OrderType.STOP, 104.01), bar)
+    assert idle_on_bar(order(Side.BUY, OrderType.STOP, 90.0, armed=False), bar)
+    assert not idle_on_bar(Order(2, "A", Side.BUY, 1.0, OrderType.MARKET, T0), bar)

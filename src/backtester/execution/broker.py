@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import copy
 import math
-from collections.abc import Sequence
+from collections import ChainMap
+from collections.abc import Mapping, Sequence
 from typing import Literal
 
 import pandas as pd
@@ -13,7 +14,12 @@ from backtester.data.feed import Bar, MarketView
 from backtester.errors import ConfigError, OrderError
 from backtester.events import FillEvent, OrderEvent
 from backtester.execution.commission import CommissionModel, NoCommission
-from backtester.execution.matching import BarSimulation, SimulatedFill, settle_bracket
+from backtester.execution.matching import (
+    BarSimulation,
+    SimulatedFill,
+    idle_on_bar,
+    settle_bracket,
+)
 from backtester.execution.slippage import NoSlippage, SlippageModel
 from backtester.orders import Order, OrderStatus, OrderType, TimeInForce
 
@@ -98,6 +104,7 @@ class SimulatedBroker:
         self._orders: dict[int, Order] = {}
         self._open: dict[int, Order] = {}
         self._children: dict[int, list[int]] = {}
+        self._oco_symbols: dict[int, str] = {}
 
     # ------------------------------------------------------------------ order book
     @property
@@ -124,9 +131,9 @@ class SimulatedBroker:
                     f"order {event.order_id}: no entry {event.parent_id} on {event.symbol}"
                 )
         if event.oco_group is not None:
-            for other in self._orders.values():
-                if other.oco_group == event.oco_group and other.symbol != event.symbol:
-                    raise OrderError("all orders of an OCO group must be on the same symbol")
+            group_symbol = self._oco_symbols.get(event.oco_group, event.symbol)
+            if group_symbol != event.symbol:
+                raise OrderError("all orders of an OCO group must be on the same symbol")
         reference = math.nan if event.trail_reference is None else float(event.trail_reference)
         order = Order(
             id=event.order_id,
@@ -150,6 +157,8 @@ class SimulatedBroker:
         self._open[order.id] = order
         if order.parent_id is not None:
             self._children.setdefault(order.parent_id, []).append(order.id)
+        if order.oco_group is not None:
+            self._oco_symbols.setdefault(order.oco_group, order.symbol)
         return order
 
     def record_rejection(self, event: OrderEvent) -> Order:
@@ -206,7 +215,8 @@ class SimulatedBroker:
         """
         ts = view.timestamp
         by_symbol: dict[str, list[Order]] = {}
-        for order in sorted(self._open.values(), key=lambda o: o.id):
+        for order_id in sorted(self._open):
+            order = self._open[order_id]
             if order.created_at < ts:
                 by_symbol.setdefault(order.symbol, []).append(order)
         timed: list[tuple[float, int, FillEvent]] = []
@@ -249,12 +259,21 @@ class SimulatedBroker:
         return math.isfinite(capacity) and intrabar > 1
 
     def _simulate(
-        self, orders: Sequence[Order], bar: Bar, capacity: float, *, high_first: bool
+        self,
+        orders: Sequence[Order],
+        bar: Bar,
+        capacity: float,
+        *,
+        high_first: bool,
+        copies: bool,
     ) -> BarSimulation:
-        local = {o.id: o for o in orders}
+        """Run one path. With ``copies``, ``orders`` stand in for their book originals."""
+        book: Mapping[int, Order] = self._orders
+        if copies:
+            book = ChainMap({o.id: o for o in orders}, self._orders)
         sim = BarSimulation(
             orders,
-            lambda oid: local.get(oid) or self._orders[oid],
+            book.__getitem__,
             self._children,
             bar,
             high_first=high_first,
@@ -267,17 +286,20 @@ class SimulatedBroker:
         return sim
 
     def _match(self, orders: list[Order], bar: Bar) -> list[SimulatedFill]:
+        if all(idle_on_bar(order, bar) for order in orders):
+            return []  # nothing can execute, so nothing can change, on either path
         capacity = self._capacity(bar)
         if self.intrabar in ("high_first", "low_first") or not self._path_sensitive(
             orders, capacity
         ):
             high_first = self.intrabar != "low_first"
-            return self._simulate(orders, bar, capacity, high_first=high_first).fills
+            sim = self._simulate(orders, bar, capacity, high_first=high_first, copies=False)
+            return sim.fills
         # Compare both paths on copies, then install the chosen copies in the book.
         candidates = []
         for high_first in (True, False):
             copies = [copy.copy(o) for o in orders]
-            sim = self._simulate(copies, bar, capacity, high_first=high_first)
+            sim = self._simulate(copies, bar, capacity, high_first=high_first, copies=True)
             candidates.append((copies, sim))
         values = [sim.close_value() for _, sim in candidates]
         worse_second = values[1] < values[0]

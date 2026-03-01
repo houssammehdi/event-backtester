@@ -31,16 +31,16 @@ from __future__ import annotations
 import math
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from typing import NamedTuple
 
 from backtester.data.feed import Bar
 from backtester.execution.commission import CommissionModel
 from backtester.execution.slippage import SlippageModel
-from backtester.orders import Order, OrderStatus, OrderType, Side
+from backtester.orders import AUCTION_TYPES, Order, OrderStatus, OrderType, Side
 
 OPEN_TIME = 0.0
 CLOSE_TIME = 3.5
 _OPEN_ONLY = frozenset({OrderType.MARKET, OrderType.MARKET_ON_OPEN})
-_NOT_INTRABAR = _OPEN_ONLY | {OrderType.MARKET_ON_CLOSE}
 _EPS = 1e-9
 
 Lookup = Callable[[int], Order]
@@ -60,8 +60,7 @@ class SimulatedFill:
     """Slippage cost in currency (price distance from the reference times quantity)."""
 
 
-@dataclass(frozen=True, slots=True)
-class _Hit:
+class _Hit(NamedTuple):
     time: float
     order: Order
     at: float
@@ -85,6 +84,27 @@ def path_points(bar: Bar, high_first: bool) -> tuple[float, float, float, float]
     if high_first:
         return bar.open, bar.high, bar.low, bar.close
     return bar.open, bar.low, bar.high, bar.close
+
+
+def idle_on_bar(order: Order, bar: Bar) -> bool:
+    """Whether ``order`` can neither execute nor change state on ``bar`` by itself.
+
+    True for an order that is not armed, and for a limit or stop order whose price the
+    bar does not reach (a buy limit below the low, a buy stop above the high, and the
+    mirror images for sells). When every order of a symbol is idle, simulating the bar
+    would do nothing on either path: an unarmed exit is only armed by a fill of its
+    entry.
+    """
+    if not order.armed:
+        return True
+    kind, buy = order.order_type, order.side is Side.BUY
+    if kind is OrderType.LIMIT:
+        assert order.limit_price is not None
+        return bar.low > order.limit_price if buy else bar.high < order.limit_price
+    if kind is OrderType.STOP:
+        assert order.stop_price is not None
+        return bar.high < order.stop_price if buy else bar.low > order.stop_price
+    return False
 
 
 def open_quantity(parent: Order, children: Mapping[int, list[int]], lookup: Lookup) -> float:
@@ -157,17 +177,25 @@ class BarSimulation:
         self._strict = strict_limits
         self._blocked: set[int] = set()
         self.fills: list[SimulatedFill] = []
+        # Phases that no order here can act in are skipped (order types never change).
+        types = {o.order_type for o in self.orders}
+        self._any_intrabar = not types <= AUCTION_TYPES
+        self._any_trailing = OrderType.TRAILING_STOP in types
+        self._any_on_close = OrderType.MARKET_ON_CLOSE in types
 
     # ------------------------------------------------------------------ driver
     def run(self) -> list[SimulatedFill]:
         """Walk the path; returns the fills in path order."""
         self._auction(self.points[0], OPEN_TIME, closing=False)
-        for k in range(3):
-            a, b = self.points[k], self.points[k + 1]
-            if a != b:
-                self._segment(k, a, b)
-            self._update_trailing(a, b)
-        self._auction(self.points[3], CLOSE_TIME, closing=True)
+        if self._any_intrabar:
+            for k in range(3):
+                a, b = self.points[k], self.points[k + 1]
+                if a != b:
+                    self._segment(k, a, b)
+                if self._any_trailing:
+                    self._update_trailing(a, b)
+        if self._any_on_close:
+            self._auction(self.points[3], CLOSE_TIME, closing=True)
         return self.fills
 
     def close_value(self) -> float:
@@ -227,7 +255,7 @@ class BarSimulation:
         while True:
             best: _Hit | None = None
             for order in self._live():
-                if order.order_type in _NOT_INTRABAR:
+                if order.order_type in AUCTION_TYPES:
                     continue
                 hit = self._reach(order, position, a, b, up, k)
                 if hit is not None and (
