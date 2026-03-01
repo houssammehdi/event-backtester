@@ -92,7 +92,15 @@ class DataFeed:
     :class:`MarketView` pinned to the current bar.
     """
 
-    __slots__ = ("_arrays", "_has_bar", "_index", "_last_close", "_positions", "_symbols")
+    __slots__ = (
+        "_arrays",
+        "_has_bar",
+        "_index",
+        "_last_close",
+        "_positions",
+        "_symbols",
+        "_timestamps",
+    )
 
     def __init__(self, frames: Mapping[str, pd.DataFrame]) -> None:
         if not frames:
@@ -107,6 +115,8 @@ class DataFeed:
         if len(index) == 0:
             raise DataError("DataFeed has no bars")
         self._index: pd.DatetimeIndex = pd.DatetimeIndex(index)
+        # Boxed once: indexing a DatetimeIndex builds a new Timestamp on every access.
+        self._timestamps: list[pd.Timestamp] = list(self._index)
         self._symbols: tuple[str, ...] = tuple(cleaned)
         self._positions: dict[str, int] = {s: j for j, s in enumerate(self._symbols)}
         n, m = len(self._index), len(self._symbols)
@@ -253,7 +263,12 @@ class MarketView:
     @property
     def timestamp(self) -> pd.Timestamp:
         """Timestamp of the current (just closed) bar."""
-        return self._feed.index[self._pos]
+        return self._feed._timestamps[self._pos]
+
+    @property
+    def previous_timestamp(self) -> pd.Timestamp | None:
+        """Timestamp of the bar before the current one (``None`` on the first bar)."""
+        return self._feed._timestamps[self._pos - 1] if self._pos > 0 else None
 
     @property
     def position(self) -> int:
@@ -299,18 +314,19 @@ class MarketView:
         return self._bar_at_pos(self._check_time(timestamp), symbol)
 
     def _bar_at_pos(self, pos: int, symbol: str) -> Bar | None:
-        j = self._feed._symbol_pos(symbol)
-        if not self._feed.has_bar[pos, j]:
+        feed = self._feed
+        j = feed._symbol_pos(symbol)
+        if not feed._has_bar.item(pos, j):
             return None
-        a = self._feed.array
+        a = feed._arrays
         return Bar(
-            timestamp=self._feed.index[pos],
+            timestamp=feed._timestamps[pos],
             symbol=symbol,
-            open=float(a("open")[pos, j]),
-            high=float(a("high")[pos, j]),
-            low=float(a("low")[pos, j]),
-            close=float(a("close")[pos, j]),
-            volume=float(a("volume")[pos, j]),
+            open=a["open"].item(pos, j),
+            high=a["high"].item(pos, j),
+            low=a["low"].item(pos, j),
+            close=a["close"].item(pos, j),
+            volume=a["volume"].item(pos, j),
         )
 
     def price(self, symbol: str) -> float:
@@ -319,8 +335,8 @@ class MarketView:
 
     def prices(self) -> dict[str, float]:
         """Last known close of every symbol."""
-        row = self._feed.last_close[self._pos]
-        return {s: float(p) for s, p in zip(self._feed.symbols, row, strict=True)}
+        row: list[float] = self._feed.last_close[self._pos].tolist()
+        return dict(zip(self._feed.symbols, row, strict=True))
 
     # ------------------------------------------------------------------ history
     def window(self, field: Field = "close", lookback: int | None = None) -> FloatArray:
@@ -341,14 +357,24 @@ class MarketView:
     def series(
         self, symbol: str, field: Field = "close", lookback: int | None = None
     ) -> FloatArray:
-        """Last ``lookback`` *actual* bars of one symbol (missing bars skipped)."""
+        """Last ``lookback`` *actual* bars of one symbol (missing bars skipped), as a copy."""
         j = self._feed._symbol_pos(symbol)
-        col = self._feed.array(field)[: self._pos + 1, j]
-        mask = self._feed.has_bar[: self._pos + 1, j]
-        values = col[mask]
-        if lookback is not None:
-            values = values[-_positive(lookback) :]
-        return values
+        stop = self._pos + 1
+        col = self._feed.array(field)[:stop, j]
+        mask = self._feed.has_bar[:stop, j]
+        if lookback is None:
+            return col[mask]
+        n = _positive(lookback)
+        # Widen the window until it holds n actual bars (or reaches the first bar), so
+        # the cost grows with the lookback, not with the length of the history.
+        span = n
+        while True:
+            start = max(stop - span, 0)
+            present = mask[start:]
+            if start == 0 or np.count_nonzero(present) >= n:
+                values: FloatArray = col[start:][present][-n:]
+                return values
+            span *= 2
 
     def history(self, field: Field = "close", lookback: int | None = None) -> pd.DataFrame:
         """Copy of the recent history of ``field`` as a DataFrame indexed by timestamp."""

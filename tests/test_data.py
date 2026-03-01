@@ -5,6 +5,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import pytest
+from hypothesis import given, settings
+from hypothesis import strategies as st
 
 from backtester import DataError, DataFeed, LookAheadError, load_csv
 from backtester.data import save_csv
@@ -113,6 +115,48 @@ class TestMarketViewEnforcesNoLookAhead:
         view = DataFeed({"X": flat_bars(5)}).view(3)
         with pytest.raises(ValueError, match="lookback"):
             view.window("close", lookback=0)
+
+
+@pytest.mark.parametrize("tz", [None, "America/New_York"])
+def test_view_timestamps_are_the_calendar(tz: str | None) -> None:
+    frame = flat_bars(5)
+    frame.index = frame.index.tz_localize(tz)
+    feed = DataFeed({"X": frame})
+    assert feed.view(0).previous_timestamp is None
+    for pos in range(len(feed)):
+        view = feed.view(pos)
+        assert view.timestamp == feed.index[pos]
+        assert view.timestamp.tz == feed.index.tz
+        assert view.bar("X").timestamp == feed.index[pos]  # type: ignore[union-attr]
+        if pos:
+            assert view.previous_timestamp == feed.index[pos - 1]
+
+
+@settings(max_examples=60, deadline=None)
+@given(
+    present=st.lists(st.booleans(), min_size=1, max_size=80),
+    lookback=st.integers(1, 90),
+    data=st.data(),
+)
+def test_series_is_the_last_actual_bars(
+    present: list[bool], lookback: int, data: st.DataObject
+) -> None:
+    """The bounded window search agrees with masking the whole history."""
+    present[0] = True  # the calendar needs a bar somewhere; B keeps the holes
+    closes = np.arange(1.0, len(present) + 1.0)
+    rows = [(c, c, c, c, 1.0) for c in closes]
+    b = bars(rows)
+    b.loc[~np.array(present)] = np.nan
+    feed = DataFeed({"A": bars(rows), "B": b})
+    pos = data.draw(st.integers(0, len(present) - 1))
+    view = feed.view(pos)
+    expected = closes[: pos + 1][np.array(present[: pos + 1])][-lookback:]
+    got = view.series("B", "close", lookback)
+    assert np.array_equal(got, expected)
+    assert np.array_equal(view.series("B"), closes[: pos + 1][np.array(present[: pos + 1])])
+    if len(got):
+        got[0] = -1.0  # a copy: the feed is untouched
+        assert np.nanmin(feed.array("close")) > 0
 
 
 def test_slice_and_select() -> None:

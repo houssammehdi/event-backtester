@@ -102,11 +102,11 @@ class TargetWeightStrategy(VectorizedStrategy):
 
     @staticmethod
     def _month_changed(view: MarketView) -> bool:
-        index = view.index
-        if len(index) < 2:
+        before = view.previous_timestamp
+        if before is None:
             return True
-        now, before = index[-1], index[-2]
-        return bool((now.year, now.month) != (before.year, before.month))
+        now = view.timestamp
+        return (now.year, now.month) != (before.year, before.month)
 
     def _is_due(self, view: MarketView, weights: FloatArray) -> bool:
         if self._previous is None or self.rebalance == "daily":
