@@ -267,6 +267,36 @@ class TestBracket:
         other = 3 if oid == 2 else 2
         assert broker.get(other).status is OrderStatus.CANCELLED
 
+    def test_submitted_orders_stay_the_live_records(self) -> None:
+        """The worst-case policy simulates both paths on copies; the chosen outcome is
+        written back, so the objects submit() returned (and the book) stay current."""
+        feed = feed_of((100, 101, 99, 100, 1e6), (100, 112, 94, 105, 1e6))
+        broker = SimulatedBroker()
+        records = [
+            broker.submit(
+                OrderEvent(feed.index[0], order_id=1, symbol="A", side=BUY, quantity=100)
+            ),
+            broker.submit(
+                OrderEvent(
+                    feed.index[0],
+                    order_id=2,
+                    symbol="A",
+                    side=SELL,
+                    quantity=100,
+                    order_type=OrderType.STOP,
+                    stop_price=95.0,
+                    tif=GTC,
+                    parent_id=1,
+                )
+            ),
+        ]
+        run_bar(broker, feed, 1)
+        run_bar(broker, feed, 2)
+        assert [broker.get(i) for i in (1, 2)] == records
+        assert all(broker.get(o.id) is o for o in records)
+        assert records[1].status is OrderStatus.FILLED
+        assert records[1].avg_fill_price == 95.0
+
     def test_gap_through_the_stop_fills_at_the_open(self) -> None:
         feed = feed_of((100, 101, 99, 100, 1e6), (90, 92, 88, 91, 1e6))
         broker = SimulatedBroker()

@@ -6,6 +6,7 @@ import copy
 import math
 from collections import ChainMap
 from collections.abc import Mapping, Sequence
+from dataclasses import fields
 from typing import Literal
 
 import pandas as pd
@@ -28,6 +29,7 @@ _PATHS = ("worst", "best", "high_first", "low_first")
 _INTRABAR = frozenset(
     {OrderType.LIMIT, OrderType.STOP, OrderType.STOP_LIMIT, OrderType.TRAILING_STOP}
 )
+_ORDER_FIELDS = tuple(f.name for f in fields(Order))
 
 
 class SimulatedBroker:
@@ -295,7 +297,8 @@ class SimulatedBroker:
             high_first = self.intrabar != "low_first"
             sim = self._simulate(orders, bar, capacity, high_first=high_first, copies=False)
             return sim.fills
-        # Compare both paths on copies, then install the chosen copies in the book.
+        # Simulate both paths on copies, then give the book's orders the chosen outcome
+        # (in place, so an Order returned by submit() stays the live record).
         candidates = []
         for high_first in (True, False):
             copies = [copy.copy(o) for o in orders]
@@ -305,10 +308,9 @@ class SimulatedBroker:
         worse_second = values[1] < values[0]
         pick_second = worse_second if self.intrabar == "worst" else values[1] > values[0]
         copies, chosen = candidates[1] if pick_second else candidates[0]
-        for replacement in copies:
-            self._orders[replacement.id] = replacement
-            if replacement.id in self._open:
-                self._open[replacement.id] = replacement
+        for order, outcome in zip(orders, copies, strict=True):
+            for name in _ORDER_FIELDS:
+                setattr(order, name, getattr(outcome, name))
         return chosen.fills
 
     def _end_of_bar(self, order_ids: list[int], timestamp: pd.Timestamp) -> None:
