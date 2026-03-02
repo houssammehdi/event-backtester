@@ -10,11 +10,9 @@ import pandas as pd
 
 from backtester.errors import ConfigError
 from backtester.events import CancelEvent, Event, OrderEvent, SignalEvent, TargetEvent
-from backtester.orders import OrderType, Side, TimeInForce
+from backtester.orders import AUCTION_TYPES, OrderType, Side, TimeInForce
 from backtester.portfolio.portfolio import Portfolio
 from backtester.portfolio.sizing import rebalance_quantities, round_to_lot, scale_to_gross
-
-_AUCTION_TYPES = frozenset({OrderType.MARKET, OrderType.MARKET_ON_OPEN, OrderType.MARKET_ON_CLOSE})
 
 
 @dataclass(frozen=True, slots=True)
@@ -90,7 +88,7 @@ class RiskManager:
     ) -> None:
         if rebalance_threshold < 0 or min_trade_notional < 0:
             raise ConfigError("rebalance_threshold and min_trade_notional must be >= 0")
-        if target_order_type not in _AUCTION_TYPES:
+        if target_order_type not in AUCTION_TYPES:
             raise ConfigError("target_order_type must be MARKET, MARKET_ON_OPEN or MARKET_ON_CLOSE")
         self.limits = limits or RiskLimits()
         self.lot_size = lot_size
@@ -254,14 +252,13 @@ class RiskManager:
             original request so it can be logged as rejected.
         """
         ts, symbol = event.timestamp, event.symbol
-        original = self._order_event(event, event.quantity, prices)
         if self.halted:
             self._note(ts, "rejected", symbol, "order rejected: kill-switch active")
-            return original, False
+            return self._order_event(event, event.quantity, prices), False
         qty = self._allowed_quantity(event, portfolio, prices, pending)
         if qty == 0:
             self._note(ts, "rejected", symbol, "order would breach risk limits")
-            return original, False
+            return self._order_event(event, event.quantity, prices), False
         if qty != event.quantity:
             self._note(ts, "clipped", symbol, f"quantity {event.quantity:g} -> {qty:g}")
         return self._order_event(event, qty, prices), True

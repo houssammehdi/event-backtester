@@ -40,9 +40,10 @@ class Position:
     @property
     def market_value(self) -> float:
         """Signed ``quantity * last_price`` (0 when flat or never priced)."""
-        if self.is_flat or math.isnan(self.last_price):
+        quantity, price = self.quantity, self.last_price
+        if -_EPS <= quantity <= _EPS or math.isnan(price):  # flat, or never priced
             return 0.0
-        return self.quantity * self.last_price
+        return quantity * price
 
     @property
     def unrealized_pnl(self) -> float:
@@ -154,7 +155,7 @@ class Portfolio:
     @property
     def market_value(self) -> float:
         """Net market value of all positions."""
-        return sum(p.market_value for p in self.positions.values())
+        return sum([p.market_value for p in self.positions.values()])
 
     @property
     def equity(self) -> float:
@@ -169,7 +170,7 @@ class Portfolio:
     @property
     def gross_exposure(self) -> float:
         """Sum of absolute position values."""
-        return sum(abs(p.market_value) for p in self.positions.values())
+        return sum([abs(p.market_value) for p in self.positions.values()])
 
     @property
     def net_exposure(self) -> float:

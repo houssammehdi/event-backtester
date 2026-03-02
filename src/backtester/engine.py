@@ -189,6 +189,7 @@ class Engine:
         )
         self._queue = EventQueue()
         self._view = feed.view(0)
+        self._prices = self._view.prices()
         self._ran = False
         self._rejected: set[int] = set()
 
@@ -236,22 +237,28 @@ class Engine:
         positions = np.zeros((n_rec, len(symbols)))
         values = np.zeros((n_rec, len(symbols)))
         fills: list[FillEvent] = []
+        portfolio = self.portfolio
+        n_symbols = len(symbols)
+        # The base class's on_fill does nothing; skip the call and its bookkeeping.
+        fill_hook = getattr(self.strategy.on_fill, "__func__", None) is not Strategy.on_fill
 
         self.strategy.on_start(self.context)
         for i in range(self._end + 1):
             view = self._view = self.feed.view(i)
+            self._prices = view.prices()  # constant within the bar
             ts = view.timestamp
+            bar_traded = 0.0
             if i >= self._start:
                 for fill in self.broker.process_bar(view):
                     self._queue.push(fill)
             self._queue.push(MarketEvent(ts, index=i))
             while self._queue:
                 event = self._queue.pop()
-                if isinstance(event, FillEvent):
-                    self.portfolio.on_fill(event)
+                if isinstance(event, FillEvent):  # the bar's fills come before its close
+                    portfolio.on_fill(event)
                     fills.append(event)
-                    traded[i - self._start] += event.notional
-                    if not self.risk.halted:
+                    bar_traded += event.notional
+                    if fill_hook and not self.risk.halted:
                         # A halted strategy is never called again, not even for the
                         # kill switch's own fills: its intents could cancel the
                         # flattening orders.
@@ -261,15 +268,20 @@ class Engine:
                 elif isinstance(event, MarketEvent):
                     self._on_market(view)
                     if i >= self._start:
+                        # One pass over the book, summed exactly like Portfolio.equity,
+                        # gross_exposure and net_exposure. The book's first positions
+                        # are the feed's symbols, in order (the engine created it).
                         k = i - self._start
-                        equity[k] = self.portfolio.equity
-                        cash[k] = self.portfolio.cash
-                        gross[k] = self.portfolio.gross_exposure
-                        net[k] = self.portfolio.net_exposure
-                        for j, s in enumerate(symbols):
-                            pos = self.portfolio.positions[s]
-                            positions[k, j] = pos.quantity
-                            values[k, j] = pos.market_value
+                        traded[k] = bar_traded
+                        held = list(portfolio.positions.values())
+                        marks = [pos.market_value for pos in held]
+                        market_value = sum(marks)
+                        equity[k] = portfolio.cash + market_value
+                        cash[k] = portfolio.cash
+                        gross[k] = sum([abs(v) for v in marks])
+                        net[k] = market_value
+                        positions[k] = [pos.quantity for pos in held[:n_symbols]]
+                        values[k] = marks[:n_symbols]
                 else:
                     self._dispatch(event)
 
@@ -308,7 +320,7 @@ class Engine:
     def _on_market(self, view: MarketView) -> None:
         ts = view.timestamp
         trading = view.position >= self._start
-        prices = view.prices()
+        prices = self._prices
         self.portfolio.mark(prices)
         if trading:
             self.portfolio.charge_borrow(self.borrow_rate, 1.0 / self.periods_per_year)
@@ -325,10 +337,10 @@ class Engine:
     def _dispatch(self, event: Event) -> None:
         if isinstance(event, TargetEvent):
             self._push_all(
-                self.risk.process_target(event, self.portfolio, self._view.prices(), self._next_id)
+                self.risk.process_target(event, self.portfolio, self._prices, self._next_id)
             )
         elif isinstance(event, SignalEvent):
-            prices = self._view.prices()
+            prices = self._prices
             if event.parent_id is not None:
                 order_event, approved = self.risk.review_exit(
                     event, prices, entry_rejected=event.parent_id in self._rejected
