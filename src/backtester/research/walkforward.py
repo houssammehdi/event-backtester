@@ -25,10 +25,12 @@ from backtester.research.grid import (
     MULTIPLE_TESTING_NOTE,
     GridSearchResult,
     Objective,
-    StrategyFactory,
-    grid_search,
+    _rank,
+    _warmup_bars,
+    expand_grid,
     sharpe_objective,
 )
+from backtester.research.parallel import RunSpec, StrategyFactory, backtest_runner
 from backtester.validation.pbo import probability_of_backtest_overfitting
 
 if TYPE_CHECKING:
@@ -173,6 +175,7 @@ def walk_forward(
     objective: Objective = sharpe_objective,
     fixed: Mapping[str, Any] | None = None,
     pbo_splits: int = 8,
+    n_jobs: int = 1,
 ) -> WalkForwardResult:
     """Run a walk-forward optimisation.
 
@@ -189,6 +192,10 @@ def walk_forward(
     Each row of :attr:`WalkForwardResult.windows` reports the in-sample deflated
     Sharpe ratio (``is_dsr``) and the probability of backtest overfitting of the
     in-sample search (``is_pbo``, CSCV with ``pbo_splits`` blocks).
+
+    With ``n_jobs > 1`` (``-1``: one per CPU) the in-sample runs of all windows, then
+    the out-of-sample runs, execute in worker processes; the result is identical to
+    the serial one (see :mod:`backtester.research.parallel`).
     """
     if not windows:
         raise ConfigError("need at least one window")
@@ -196,30 +203,30 @@ def walk_forward(
         if after.test_start <= before.test_end:
             raise ConfigError("out-of-sample windows overlap")
     cfg = config or BacktestConfig()
+    combos = expand_grid(grid)
+    base = dict(fixed or {})
+    lookback = _warmup_bars(factory, [RunSpec({**base, **p}) for p in combos])
+    train = [
+        RunSpec({**base, **p}, w.train_start, w.train_end, until=w.train_end)
+        for w in windows
+        for p in combos
+    ]
+    with backtest_runner(feed, factory, cfg, n_jobs=n_jobs) as run:
+        runs = run(train)
+        searches = [
+            _rank(combos, [next(runs) for _ in combos], objective, lookback) for _ in windows
+        ]
+        test = [
+            RunSpec({**base, **s.best_params}, w.test_start, w.test_end, until=w.test_end)
+            for w, s in zip(windows, searches, strict=True)
+        ]
+        oos_results = list(run(test))
     rows: list[dict[str, Any]] = []
     oos_parts: list[pd.Series] = []
-    oos_results: list[BacktestResult] = []
-    n_trials = 0
-    for k, w in enumerate(windows):
-        train_feed = feed.slice(0, w.train_end + 1)
-        search = grid_search(
-            train_feed,
-            factory,
-            grid,
-            config=cfg,
-            objective=objective,
-            start=w.train_start,
-            end=w.train_end,
-            fixed=fixed,
-        )
-        n_trials = search.n_trials
-        test_feed = feed.slice(0, w.test_end + 1)
-        strategy = factory(**{**(fixed or {}), **search.best_params})
-        oos = cfg.run(test_feed, strategy, start=w.test_start, end=w.test_end)
+    for k, (w, search, oos) in enumerate(zip(windows, searches, oos_results, strict=True)):
         previous_equity = oos.equity.shift(1)
         previous_equity.iloc[0] = oos.initial_cash
         oos_parts.append(oos.equity / previous_equity - 1.0)
-        oos_results.append(oos)
         index = feed.index
         rows.append(
             {
@@ -248,5 +255,5 @@ def walk_forward(
         oos_results=oos_results,
         initial_cash=cfg.initial_cash,
         periods_per_year=cfg.periods_per_year,
-        n_trials=n_trials,
+        n_trials=len(combos),
     )

@@ -22,14 +22,13 @@ from backtester.config import BacktestConfig, Bound
 from backtester.data.feed import DataFeed
 from backtester.engine import BacktestResult
 from backtester.errors import ConfigError
-from backtester.strategy.base import Strategy
+from backtester.research.parallel import RunSpec, StrategyFactory, backtest_runner
 from backtester.strategy.rebalancing import TargetWeightStrategy
 from backtester.validation.sharpe import deflated_sharpe_ratio, sample_moments
 
 if TYPE_CHECKING:
     from backtester.validation.report import FamilyValidation
 
-StrategyFactory = Callable[..., Strategy]
 Objective = Callable[[BacktestResult], float]
 
 MULTIPLE_TESTING_NOTE = (
@@ -121,6 +120,7 @@ def grid_search(
     start: Bound = None,
     end: Bound = None,
     fixed: Mapping[str, Any] | None = None,
+    n_jobs: int = 1,
 ) -> GridSearchResult:
     """Backtest every combination in ``grid`` and rank them by ``objective``.
 
@@ -130,21 +130,43 @@ def grid_search(
             the strategy class).
         grid: ``parameter -> candidate values``.
         config: Execution/risk settings (a fresh broker and risk manager per run).
-        objective: Score to maximise; defaults to the annualised Sharpe ratio.
+        objective: Score to maximise; defaults to the annualised Sharpe ratio. It is
+            evaluated in this process.
         start: First bar of the evaluation window (earlier bars are warm-up).
         end: Last bar of the evaluation window.
         fixed: Extra keyword arguments passed to every ``factory`` call.
+        n_jobs: Worker processes for the backtests (``-1``: one per CPU). The result
+            is identical to the serial one; see :mod:`backtester.research.parallel`
+            for what must be picklable.
     """
     cfg = config or BacktestConfig()
     combos = expand_grid(grid)
-    rows: list[dict[str, Any]] = []
-    results: list[BacktestResult] = []
+    specs = [RunSpec({**(fixed or {}), **p}, start, end) for p in combos]
+    lookback = _warmup_bars(factory, specs)  # also checks every configuration up front
+    with backtest_runner(feed, factory, cfg, n_jobs=n_jobs) as run:
+        results = list(run(specs))
+    return _rank(combos, results, objective, lookback)
+
+
+def _warmup_bars(factory: StrategyFactory, specs: Sequence[RunSpec]) -> int:
+    """Largest ``history_bars`` of the target-weight strategies ``specs`` build (else 0)."""
     lookback = 0
-    for params in combos:
-        strategy = factory(**{**(fixed or {}), **params})
+    for spec in specs:
+        strategy = factory(**spec.params)
         if isinstance(strategy, TargetWeightStrategy):
             lookback = max(lookback, strategy.history_bars)
-        result = cfg.run(feed, strategy, start=start, end=end)
+    return lookback
+
+
+def _rank(
+    combos: Sequence[Mapping[str, Any]],
+    results: Sequence[BacktestResult],
+    objective: Objective,
+    lookback: int,
+) -> GridSearchResult:
+    """Score, rank and deflate the backtests of a grid (``results`` in grid order)."""
+    rows: list[dict[str, Any]] = []
+    for params, result in zip(combos, results, strict=True):
         eq = result.equity
         per_period_sharpe = sample_moments(result.returns)[0]
         rows.append(
@@ -159,7 +181,6 @@ def grid_search(
                 "_sr": per_period_sharpe,
             }
         )
-        results.append(result)
     table = pd.DataFrame(rows)
     order = table["objective"].sort_values(ascending=False, kind="stable").index
     best_pos = int(order[0])

@@ -148,13 +148,11 @@ def test_walk_forward_fits_never_see_out_of_sample_data(feed: DataFeed) -> None:
     grid = {"fast": [5, 10], "slow": [40, 80]}
     windows = walk_forward_windows(len(feed), 252, 126, start=100, gap=3)
     wf = walk_forward(feed, Spy, grid, windows)
-    per_window = len(expand_grid(grid)) + 1  # fits, then one OOS run
-    assert len(Spy.seen) == per_window * len(windows)
-    for k, w in enumerate(windows):
-        runs = Spy.seen[k * per_window : (k + 1) * per_window]
-        for _, last_seen in runs[:-1]:
-            assert last_seen == feed.index[w.train_end]  # fitting stops at the IS end
-        assert runs[-1][1] == feed.index[w.test_end]
+    last_seen = [ts for _, ts in Spy.seen if ts != pd.Timestamp.min]  # instances that ran
+    n_fits = len(expand_grid(grid))
+    # every fit of every window stops at its IS end, then each OOS run at its test end
+    fits = [feed.index[w.train_end] for w in windows for _ in range(n_fits)]
+    assert last_seen == fits + [feed.index[w.test_end] for w in windows]
     # stitched OOS covers exactly the test windows, once each
     expected = sum(w.test_end - w.test_start + 1 for w in windows)
     assert len(wf.oos_returns) == expected

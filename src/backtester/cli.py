@@ -26,6 +26,7 @@ from backtester.errors import BacktesterError, ConfigError
 from backtester.execution.commission import BpsCommission, CommissionModel, PerShareCommission
 from backtester.execution.slippage import FixedBpsSlippage, SlippageModel, SquareRootImpactSlippage
 from backtester.research.grid import config_label, grid_search
+from backtester.research.parallel import resolve_jobs
 from backtester.research.walkforward import walk_forward, walk_forward_windows
 from backtester.risk import RiskLimits
 from backtester.strategies import STRATEGIES
@@ -133,6 +134,13 @@ def _grid_arg(p: argparse.ArgumentParser) -> None:
         action="append",
         default=[],
         help="parameter grid key=v1,v2,... (repeatable; defaults per strategy)",
+    )
+    p.add_argument(
+        "--jobs",
+        "-j",
+        type=int,
+        default=1,
+        help="worker processes for the backtests (-1: one per CPU; default 1)",
     )
 
 
@@ -299,12 +307,17 @@ def _describe_grid(grid: dict[str, list[Any]]) -> str:
     return ", ".join(f"{k}={v}" for k, v in grid.items())
 
 
+def _workers(n_jobs: int) -> str:
+    jobs = resolve_jobs(n_jobs)
+    return "" if jobs == 1 else f" ({jobs} worker processes)"
+
+
 def _cmd_validate(args: argparse.Namespace) -> int:
     feed = _load_feed(args)
     cfg = _config(args)
     grid = _resolve_grid(args)
     t0 = time.perf_counter()
-    search = grid_search(feed, STRATEGIES[args.strategy], grid, config=cfg)
+    search = grid_search(feed, STRATEGIES[args.strategy], grid, config=cfg, n_jobs=args.jobs)
     elapsed = time.perf_counter() - t0
     benchmark = None
     if args.benchmark == "buyhold":
@@ -340,7 +353,7 @@ def _cmd_validate(args: argparse.Namespace) -> int:
     print(report.format())
     print()
     print(_describe_costs(cfg))
-    print(f"Ran {search.n_trials} backtests in {elapsed:.1f}s")
+    print(f"Ran {search.n_trials} backtests in {elapsed:.1f}s{_workers(args.jobs)}")
     return 0
 
 
@@ -359,7 +372,7 @@ def _cmd_walkforward(args: argparse.Namespace) -> int:
         start=args.warmup,
     )
     t0 = time.perf_counter()
-    wf = walk_forward(feed, STRATEGIES[args.strategy], grid, windows, config=cfg)
+    wf = walk_forward(feed, STRATEGIES[args.strategy], grid, windows, config=cfg, n_jobs=args.jobs)
     elapsed = time.perf_counter() - t0
     print(f"Walk-forward: {args.strategy}  grid: {_describe_grid(grid)}")
     print(
@@ -413,7 +426,8 @@ def _cmd_walkforward(args: argparse.Namespace) -> int:
     print()
     print(wf.note())
     print(_describe_costs(cfg))
-    print(f"Ran {len(windows) * (wf.n_trials + 1)} backtests in {elapsed:.1f}s")
+    runs = len(windows) * (wf.n_trials + 1)
+    print(f"Ran {runs} backtests in {elapsed:.1f}s{_workers(args.jobs)}")
     if args.plot is not None:
         from backtester.plotting import plot_walk_forward
 

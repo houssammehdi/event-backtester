@@ -53,10 +53,13 @@ def test_walkforward_prints_windows_and_warning(capsys: pytest.CaptureFixture[st
             "fast=5,10",
             "-g",
             "slow=40",
+            "--jobs",
+            "2",
         ]
     )
     out = capsys.readouterr().out
     assert code == 0
+    assert "(2 worker processes)" in out
     assert "Stitched out-of-sample" in out
     assert "deflated Sharpe" in out
     assert "fast=" in out
@@ -128,6 +131,8 @@ def test_errors_exit_with_code_2(capsys: pytest.CaptureFixture[str]) -> None:
     assert main(["run", "--years", "1", "-p", "novalue"]) == 2
     assert main(["walkforward", "--years", "1", "-g", "bad=1"]) == 2
     assert main(["validate", "--years", "1", "-g", "bad=1"]) == 2
+    assert main(["validate", "--years", "1", "--jobs", "0"]) == 2
+    assert "n_jobs" in capsys.readouterr().err
 
 
 def test_plot_option_writes_png(tmp_path: Path) -> None:

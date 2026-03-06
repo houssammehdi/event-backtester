@@ -6,7 +6,7 @@ import math
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal, TypeVar
 
 import numpy as np
 import numpy.typing as npt
@@ -18,6 +18,7 @@ Field = Literal["open", "high", "low", "close", "volume"]
 FIELDS: tuple[Field, ...] = ("open", "high", "low", "close", "volume")
 FloatArray = npt.NDArray[np.float64]
 BoolArray = npt.NDArray[np.bool_]
+ArrayT = TypeVar("ArrayT", bound=npt.NDArray[Any])
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,7 +34,7 @@ class Bar:
     volume: float
 
 
-def _readonly(array: FloatArray) -> FloatArray:
+def _readonly(array: ArrayT) -> ArrayT:
     array.flags.writeable = False
     return array
 
@@ -126,11 +127,29 @@ class DataFeed:
             for f in FIELDS:
                 arrays[f][pos, j] = df[f].to_numpy()
         self._arrays = {f: _readonly(a) for f, a in arrays.items()}
-        has_bar = ~np.isnan(arrays["close"])
-        has_bar.flags.writeable = False
-        self._has_bar: BoolArray = has_bar
+        self._has_bar: BoolArray = _readonly(~np.isnan(arrays["close"]))
         last_close = pd.DataFrame(arrays["close"]).ffill().to_numpy(dtype=np.float64)
         self._last_close = _readonly(last_close)
+
+    def __getstate__(self) -> dict[str, object]:
+        # Pickling (worker processes) keeps the arrays but not the boxed calendar, and
+        # __setstate__ makes the unpickled arrays read-only again.
+        return {
+            "index": self._index,
+            "symbols": self._symbols,
+            "arrays": self._arrays,
+            "has_bar": self._has_bar,
+            "last_close": self._last_close,
+        }
+
+    def __setstate__(self, state: dict[str, Any]) -> None:
+        self._index = state["index"]
+        self._symbols = state["symbols"]
+        self._positions = {s: j for j, s in enumerate(self._symbols)}
+        self._timestamps = list(self._index)
+        self._arrays = {f: _readonly(a) for f, a in state["arrays"].items()}
+        self._has_bar = _readonly(state["has_bar"])
+        self._last_close = _readonly(state["last_close"])
 
     # ------------------------------------------------------------------ constructors
     @classmethod
