@@ -84,15 +84,12 @@ class BracketBreakout(Strategy):
 
 def ambiguous_exits(result: BacktestResult, feed: DataFeed) -> int:
     """Exits on bars whose range contained both the stop-loss and the target."""
-    by_id = {o.id: o for o in result.orders}
+    targets = {o.parent_id: o for o in result.orders if o.tag == "take_profit"}
     count = 0
     for order in result.orders:
         if order.tag != "stop_loss" or order.parent_id is None:
             continue
-        target = next(
-            (by_id[i] for i in by_id if by_id[i].parent_id == order.parent_id and i != order.id),
-            None,
-        )
+        target = targets.get(order.parent_id)
         exit_order = order if order.filled_quantity > 0 else target
         if target is None or exit_order is None or exit_order.filled_quantity == 0:
             continue
