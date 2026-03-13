@@ -32,6 +32,7 @@ from backtester.risk import RiskLimits
 from backtester.strategies import STRATEGIES
 from backtester.strategy.rebalancing import TargetWeightStrategy
 from backtester.validation.cv import CombinatorialPurgedCV
+from backtester.validation.sharpe import sample_moments
 
 DEFAULT_GRIDS: dict[str, dict[str, list[Any]]] = {
     "sma": {"fast": [20, 50], "slow": [100, 200]},
@@ -166,9 +167,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--param", "-p", action="append", default=[], help="strategy parameter key=value"
     )
     run.add_argument("--plot", type=Path, help="save an equity/drawdown PNG here")
+    run.add_argument("--report", type=Path, help="write a self-contained HTML tear sheet here")
     run.add_argument("--trades", type=int, default=0, help="also print the last N trades")
     _add_data_args(run)
     _add_exec_args(run)
+    _add_bootstrap_args(run)
 
     wf = sub.add_parser("walkforward", help="walk-forward optimisation with stitched OOS")
     _strategy_arg(wf)
@@ -207,6 +210,11 @@ def build_parser() -> argparse.ArgumentParser:
     val.add_argument("--cpcv-test", type=int, default=2, help="CPCV test groups (default 2)")
     val.add_argument(
         "--embargo", type=int, default=0, help="CPCV embargo bars after each test block"
+    )
+    val.add_argument(
+        "--report",
+        type=Path,
+        help="write the HTML tear sheet of the selected configuration (with its DSR) here",
     )
     _add_data_args(val)
     _add_exec_args(val)
@@ -257,6 +265,34 @@ def _config(args: argparse.Namespace) -> BacktestConfig:
     )
 
 
+def _report_notes(args: argparse.Namespace, cfg: BacktestConfig) -> list[tuple[str, str]]:
+    """Header lines of a tear sheet: where the data came from and what trading cost."""
+    if args.csv is not None:
+        data = f"CSV: {args.csv}"
+    elif args.universe == "multi":
+        data = f"Synthetic multi-asset universe, {args.years:g} years, seed {args.seed}"
+    else:
+        data = f"Synthetic: {args.symbols} symbols, {args.years:g} years, seed {args.seed}"
+    costs = [
+        _describe_model(cfg.slippage, "slippage"),
+        _describe_model(cfg.commission, "commission"),
+    ]
+    if cfg.max_participation is not None:
+        costs.append(f"fills capped at {cfg.max_participation:.0%} of each bar's volume")
+    return [("Data", data), ("Costs", "; ".join(costs))]
+
+
+def _describe_model(model: SlippageModel | CommissionModel, kind: str) -> str:
+    """Short description of a cost model for a report header."""
+    if isinstance(model, FixedBpsSlippage | BpsCommission):
+        return f"{model.bps:g} bps {kind}"
+    if isinstance(model, SquareRootImpactSlippage):
+        return f"square-root impact (eta {model.eta:g}) plus {model.spread_bps:g} bps {kind}"
+    if isinstance(model, PerShareCommission):
+        return f"{model.rate:g} per share {kind} (minimum {model.minimum:g})"
+    return f"{kind}: {model}"
+
+
 def _describe_costs(cfg: BacktestConfig) -> str:
     return (
         f"Execution: next-bar open / intrabar, slippage={cfg.slippage}, "
@@ -292,6 +328,11 @@ def _cmd_run(args: argparse.Namespace) -> int:
     if args.plot is not None:
         result.plot(args.plot)
         print(f"Saved plot to {args.plot}")
+    if args.report is not None:
+        result.tear_sheet(
+            args.report, notes=_report_notes(args, cfg), n_samples=args.samples, seed=args.boot_seed
+        )
+        print(f"Saved tear sheet to {args.report}")
     return 0
 
 
@@ -354,6 +395,20 @@ def _cmd_validate(args: argparse.Namespace) -> int:
     print()
     print(_describe_costs(cfg))
     print(f"Ran {search.n_trials} backtests in {elapsed:.1f}s{_workers(args.jobs)}")
+    if args.report is not None:
+        trial_sharpes = [sample_moments(search.returns[c])[0] for c in search.returns.columns]
+        search.best_result.tear_sheet(
+            args.report,
+            title=f"{args.strategy} ({config_label(search.best_params)})",
+            notes=[
+                *_report_notes(args, cfg),
+                ("Selection", f"best Sharpe ratio of {search.n_trials} configurations"),
+            ],
+            trial_sharpes=trial_sharpes,
+            n_samples=args.samples,
+            seed=args.boot_seed,
+        )
+        print(f"Saved tear sheet of the selected configuration to {args.report}")
     return 0
 
 

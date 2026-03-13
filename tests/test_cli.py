@@ -197,3 +197,22 @@ def test_closed_stdout_exits_quietly() -> None:
         stderr = proc.stderr.read().decode()
     assert proc.wait() == 141  # 128 + SIGPIPE, like other command-line tools
     assert "Traceback" not in stderr
+
+
+def test_run_and_validate_write_tear_sheets(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    run = tmp_path / "run.html"
+    args = ["--years", "2", "--symbols", "3", "--samples", "200"]
+    assert main(["run", *args, "--report", str(run)]) == 0
+    assert "Saved tear sheet" in capsys.readouterr().out
+    page = run.read_text(encoding="utf-8")
+    assert "Synthetic: 3 symbols, 2 years, seed 42" in page
+    assert "Deflated Sharpe" not in page  # one configuration: nothing to deflate
+    val = tmp_path / "validate.html"
+    grid = ["-s", "sma", "-g", "fast=10,20", "-g", "slow=50", "--pbo-splits", "4"]
+    assert main(["validate", *args, *grid, "--report", str(val)]) == 0
+    assert "selected configuration" in capsys.readouterr().out
+    page = val.read_text(encoding="utf-8")
+    assert "Deflated Sharpe ratio (2 trials)" in page
+    assert "best Sharpe ratio of 2 configurations" in page
