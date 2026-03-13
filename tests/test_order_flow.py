@@ -14,10 +14,14 @@ from backtester import (
     DataFeed,
     Engine,
     FixedBpsSlippage,
+    MarketView,
+    Order,
     OrderError,
     OrderStatus,
     OrderType,
     RiskLimits,
+    Strategy,
+    StrategyContext,
     TimeInForce,
     generate_ohlcv,
 )
@@ -127,3 +131,87 @@ def test_market_on_close_rebalancing_matches_the_vectorized_close_path(name: str
     assert event.orders[0].order_type is OrderType.MARKET_ON_CLOSE
     with pytest.raises(ConfigError, match="execution"):
         run_vectorized(feed, STRATEGIES[name](), execution="vwap")  # type: ignore[arg-type]
+
+
+class RandomOrders(Strategy):
+    """Random orders of every type, brackets, OCO pairs and cancels."""
+
+    def __init__(self, seed: int) -> None:
+        self.rng = np.random.default_rng(seed)
+
+    def on_bar(self, view: MarketView, ctx: StrategyContext) -> None:
+        rng = self.rng
+        for symbol in view.symbols:
+            price, u = view.price(symbol), rng.random()
+            qty = float(rng.integers(1, 400)) * (1 if rng.random() < 0.5 else -1)
+            off = float(rng.uniform(0.003, 0.03))
+            near = price * (1 - off) if qty > 0 else price * (1 + off)
+            far = price * (1 + off) if qty > 0 else price * (1 - off)
+            tif = GTC if rng.random() < 0.5 else TimeInForce.DAY
+            if u < 0.1:
+                ctx.order(symbol, qty, OrderType.LIMIT, limit_price=near, tif=tif)
+            elif u < 0.2:
+                ctx.order(symbol, qty, OrderType.STOP, stop_price=far, tif=tif)
+            elif u < 0.25:
+                ctx.order(
+                    symbol, qty, OrderType.STOP_LIMIT, stop_price=far, limit_price=far, tif=tif
+                )
+            elif u < 0.3:
+                ctx.order(symbol, qty, OrderType.TRAILING_STOP, trail_percent=off, tif=tif)
+            elif u < 0.35:
+                kind = OrderType.MARKET_ON_CLOSE if rng.random() < 0.5 else OrderType.MARKET
+                ctx.order(symbol, qty, kind)
+            elif u < 0.45:  # limit entry, stop-loss 2 x off away, target 3 x off away
+                side = 1 if qty > 0 else -1
+                stop, target = price * (1 - 2 * side * off), price * (1 + 3 * side * off)
+                entry = OrderType.LIMIT
+                ctx.bracket(
+                    symbol, qty, entry, limit_price=near, stop_loss=stop, take_profit=target
+                )
+            elif u < 0.5:
+                ctx.bracket(symbol, qty, trail_amount=price * off)
+            elif u < 0.55:
+                group = ctx.oco_group()
+                ctx.order(symbol, qty, OrderType.LIMIT, limit_price=near, oco_group=group, tif=tif)
+                ctx.order(symbol, qty, OrderType.STOP, stop_price=far, oco_group=group, tif=tif)
+            elif u < 0.6 and ctx.open_orders(symbol):
+                ctx.cancel(ctx.open_orders(symbol)[0].id)
+
+
+@pytest.mark.parametrize(
+    "config",
+    [
+        BacktestConfig(slippage=FixedBpsSlippage(3.0), commission=BpsCommission(1.0)),
+        BacktestConfig(intrabar="best", strict_limits=True, max_participation=0.0001),
+        BacktestConfig(intrabar="low_first", limits=RiskLimits(allow_short=False)),
+    ],
+    ids=["worst", "best-strict-capacity", "low-first-long-only"],
+)
+def test_random_order_flow_keeps_every_book_consistent(config: BacktestConfig) -> None:
+    """The engine checks both accounting identities on every bar; here the order
+    records, the fills and the positions must also agree with each other."""
+    feed = DataFeed(generate_ohlcv(n_symbols=3, years=1, seed=9))
+    result = config.run(feed, RandomOrders(4), check_invariants=True)
+    fills, orders = result.fills, {o.id: o for o in result.orders}
+    assert len(fills) > 100
+    filled = fills.groupby("order_id")["quantity"].sum()
+    for order in orders.values():
+        assert filled.get(order.id, 0.0) == pytest.approx(order.filled_quantity)
+        if order.status is OrderStatus.FILLED:
+            assert order.filled_quantity == pytest.approx(order.quantity)
+        assert (order.closed_at is not None) == order.status.is_terminal
+    signed = fills["quantity"].where(fills["side"] == "buy", -fills["quantity"])
+    position = signed.groupby(fills["symbol"]).sum()
+    for symbol in feed.symbols:
+        assert result.positions[symbol].iloc[-1] == pytest.approx(position.get(symbol, 0.0))
+    for entry_id in {o.parent_id for o in orders.values() if o.parent_id is not None}:
+        exits = [o for o in orders.values() if o.parent_id == entry_id]
+        closed = sum(o.filled_quantity for o in exits)
+        assert closed <= orders[entry_id].filled_quantity + 1e-9  # exits never overshoot
+    groups: dict[int, list[Order]] = {}
+    for order in orders.values():
+        if order.oco_group is not None:
+            groups.setdefault(order.oco_group, []).append(order)
+    assert groups
+    for members in groups.values():
+        assert sum(o.filled_quantity > 0 for o in members) <= 1  # one cancels the other
