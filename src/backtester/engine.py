@@ -6,6 +6,7 @@ import itertools
 import math
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -30,8 +31,6 @@ from backtester.risk import RiskAction, RiskLimits, RiskManager
 from backtester.strategy.base import Strategy, StrategyContext
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     from backtester.analytics.metrics import Metrics
 
 _FILL_COLUMNS = [
@@ -118,6 +117,16 @@ class BacktestResult:
         from backtester.plotting import plot_result
 
         return plot_result(self, path=path)
+
+    def tear_sheet(self, path: str | Path, **kwargs: Any) -> Path:
+        """Write the self-contained HTML tear sheet of this run to ``path``.
+
+        Keyword arguments go to :func:`backtester.analytics.tearsheet.tear_sheet_html`
+        (``title``, ``notes``, ``trial_sharpes`` for the deflated Sharpe ratio, ...).
+        """
+        from backtester.analytics.tearsheet import write_tear_sheet
+
+        return write_tear_sheet(self, path, **kwargs)
 
 
 class Engine:
