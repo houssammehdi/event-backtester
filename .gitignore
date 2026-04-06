@@ -22,5 +22,6 @@ htmlcov/
 
 # Local outputs
 /output/
+*.html
 *.png
 !docs/*.png

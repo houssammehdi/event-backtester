@@ -39,4 +39,26 @@ jobs:
         run: pytest
 
       - name: CLI smoke test
-        run: backtest run --strategy tsmom --symbols 5 --years 10 --seed 42
+        run: |
+          backtest run --strategy tsmom --symbols 5 --years 10 --seed 42 --report tear_sheet.html
+          backtest validate --strategy tsmom --symbols 5 --years 10 --seed 42 --samples 500
+
+  slow:
+    name: Monte Carlo studies (pytest -m slow)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+
+      - name: Slow tests
+        run: pytest -m slow
