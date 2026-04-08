@@ -54,7 +54,7 @@ from backtester.risk import RiskLimits, RiskManager
 from backtester.strategy import Bracket, Strategy, StrategyContext, VectorizedStrategy
 from backtester.strategy.rebalancing import TargetWeightStrategy
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 __all__ = [
     "AccountingError",

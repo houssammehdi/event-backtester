@@ -4,14 +4,23 @@ build-backend = "hatchling.build"
 
 [project]
 name = "event-backtester"
-version = "0.1.0"
-description = "Event-driven backtesting engine for systematic trading strategies, built around correctness."
+version = "0.2.0"
+description = "Event-driven backtesting and validation for systematic trading strategies: no look-ahead by construction, statistics against overfitting."
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
 authors = [{ name = "Houssam Mehdi" }]
 requires-python = ">=3.11"
-keywords = ["backtesting", "trading", "quant", "event-driven", "walk-forward", "momentum"]
+keywords = [
+    "backtesting",
+    "trading",
+    "quant",
+    "event-driven",
+    "walk-forward",
+    "backtest-overfitting",
+    "bootstrap",
+    "risk-parity",
+]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Financial and Insurance Industry",
