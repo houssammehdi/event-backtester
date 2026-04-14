@@ -57,8 +57,8 @@ All notable changes to this project are documented in this file. The format foll
 
 ### Changed
 
-- The event engine is faster, with identical results: 1.2-2.2x against 0.1.0 on the
-  benchmark scenarios both versions run, and 1.5-2.0x against 0.2.0 before tuning
+- The event engine is faster, with identical results: 1.1-1.9x against 0.1.0 on the
+  benchmark scenarios both versions run, and 1.5-2.1x against 0.2.0 before tuning
   (`docs/guide.md`, section Performance). Market views box the calendar once, each
   bar is priced and valued once, bars and path phases on which no order can act are
   skipped, and orders are copied and validated more cheaply.

@@ -308,18 +308,20 @@ Median of 7 runs, the three versions interleaved round by round ("before tuning"
 
 | Scenario | 0.1.0 | 0.2.0 before tuning | 0.2.0 | bars/s |
 |---|---|---|---|---|
-| `tsmom_monthly_5`: time-series momentum, 5 symbols, monthly targets | 0.733 s | 0.680 s | 0.339 s | 7,434 |
-| `sma_daily_20`: SMA crossover, 20 symbols, re-targeted every bar | 1.577 s | 2.011 s | 1.334 s | 1,889 |
-| `brackets_5`: stop entries with bracket exits, 5 symbols | - | 3.965 s | 2.094 s | 1,203 |
-| `allocation_hrp_14`: monthly HRP over 14 assets | - | 0.700 s | 0.413 s | 6,102 |
+| `tsmom_monthly_5`: time-series momentum, 5 symbols, monthly targets | 0.569 s | 0.614 s | 0.293 s | 8,601 |
+| `sma_daily_20`: SMA crossover, 20 symbols, re-targeted every bar | 1.306 s | 1.790 s | 1.158 s | 2,176 |
+| `brackets_5`: stop entries with bracket exits, 5 symbols | - | 3.397 s | 1.737 s | 1,451 |
+| `allocation_hrp_14`: monthly HRP over 14 assets | - | 0.596 s | 0.364 s | 6,923 |
 
 The machine was a shared 4-vCPU cloud VM (Intel Xeon, 2.8 GHz) running other jobs:
-the 1-minute load average stayed between 7.1 and 8.2 during the measurement, so
-absolute times are indicative and inflated; the ratios are more reliable. The final
-equity of every scenario is identical in all versions that can run it.
+the 1-minute load average stayed between 3.0 and 3.4 during the measurement (about
+one unit of it this benchmark), so absolute times are indicative; the ratios are more
+reliable. Two earlier runs at load averages near 6 and 7.7 gave ratios within 0.25 of
+these. The final equity of every scenario is identical in all versions that can run
+it.
 
 What changed, found with `cProfile`: the new order machinery had made the
-daily-rebalancing scenario 28 % slower than 0.1.0 (2.011 s against 1.577 s above),
+daily-rebalancing scenario 37 % slower than 0.1.0 (1.790 s against 1.306 s above),
 and the engine spent much of its time boxing pandas timestamps and building
 dictionaries. The tuned engine boxes the calendar once,
 reads bars with `ndarray.item`, prices each bar once, values the book in one pass,
@@ -336,17 +338,18 @@ serial result:
 $ python scripts/benchmark_parallel.py --repeat 3
 18 configurations, 2520 bars x 10 symbols
 CPUs available: 4
-n_jobs=1   median   8.39 s   x1.00
-n_jobs=2   median   6.43 s   x1.31
-n_jobs=4   median   6.07 s   x1.38
+n_jobs=1   median   6.51 s   x1.00
+n_jobs=2   median   4.22 s   x1.54
+n_jobs=4   median   4.15 s   x1.57
 (speed-ups relative to n_jobs=1; results identical across settings)
 ```
 
-On the loaded VM described above (load average about 7.8 when the run started) the
-workers competed with other jobs for the four cores, so this understates the
-speed-up of an idle machine. Starting the workers (each imports NumPy and pandas and
-receives the feed) is a fixed cost, so parallel runs pay off for searches that take
-more than a few seconds.
+This run had the machine at a load average of about 2 at its start. Two workers give
+most of the gain: the other jobs on the VM left little spare capacity for four, and
+starting the workers (each imports NumPy and pandas and receives the feed) is a fixed
+cost. At load averages of 6 to 8 the same benchmark measured between 0.7x and 1.4x, so
+on a busy machine parallel runs can be slower; they pay off for searches that take
+more than a few seconds on a machine with idle cores.
 
 ## Development
 

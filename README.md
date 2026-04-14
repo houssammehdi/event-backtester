@@ -166,16 +166,16 @@ version:
 
 | Scenario | 0.1.0 | 0.2.0 |
 |---|---|---|
-| Time-series momentum, 5 symbols, monthly targets | 0.73 s | 0.34 s (7,400 bars/s) |
-| SMA crossover, 20 symbols, daily targets | 1.58 s | 1.33 s (1,900 bars/s) |
-| Bracket breakout, 5 symbols (not available in 0.1.0) | - | 2.09 s (1,200 bars/s) |
-| HRP allocation, 14 assets (not available in 0.1.0) | - | 0.41 s (6,100 bars/s) |
+| Time-series momentum, 5 symbols, monthly targets | 0.57 s | 0.29 s (8,600 bars/s) |
+| SMA crossover, 20 symbols, daily targets | 1.31 s | 1.16 s (2,200 bars/s) |
+| Bracket breakout, 5 symbols (not available in 0.1.0) | - | 1.74 s (1,450 bars/s) |
+| HRP allocation, 14 assets (not available in 0.1.0) | - | 0.36 s (6,900 bars/s) |
 
-Measured on a shared 4-vCPU cloud VM whose load average stayed around 7.7 from other
-jobs, so the times are indicative; the versions were interleaved to keep the
-comparison fair. Both versions give the same final equity. A grid search of 18
-configurations took 8.4 s serially and 6.1 s with `n_jobs=4` on the same loaded
-machine (identical results). Details in the [guide](docs/guide.md#performance).
+Measured on a shared 4-vCPU cloud VM running other jobs (load average about 3), so
+the times are indicative; the versions were interleaved to keep the comparison fair,
+and both give the same final equity. A grid search of 18 configurations took 6.5 s
+serially and 4.2 s with `n_jobs=4` (1.6x, identical results). Details in the
+[guide](docs/guide.md#performance).
 
 ## Documentation
 
