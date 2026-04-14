@@ -185,18 +185,29 @@ def test_multi_asset_universe(tmp_path: Path, capsys: pytest.CaptureFixture[str]
 
 def test_closed_stdout_exits_quietly() -> None:
     """Regression: `backtest ... | head` printed a BrokenPipeError traceback."""
+    import os
     import subprocess
     import sys
 
-    cmd = [sys.executable, "-m", "backtester.cli", "strategies"]
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    assert proc.stdout is not None
-    assert proc.stderr is not None
-    proc.stdout.close()  # the reader goes away before the first write
-    with proc.stderr:
-        stderr = proc.stderr.read().decode()
-    assert proc.wait() == 141  # 128 + SIGPIPE, like other command-line tools
-    assert "Traceback" not in stderr
+    # Close the read end before the child starts, so its first write (or its final
+    # flush of buffered output) is guaranteed to hit a broken pipe; no race.
+    read_fd, write_fd = os.pipe()
+    os.close(read_fd)
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-m", "backtester.cli", "strategies"],
+            stdout=write_fd,
+            stderr=subprocess.PIPE,
+            check=False,
+            # Buffered stdout (the default outside this test's control) is the case
+            # that used to fail: the write only happened at the final flush.
+            env={k: v for k, v in os.environ.items() if k != "PYTHONUNBUFFERED"},
+        )
+    finally:
+        os.close(write_fd)
+    assert proc.returncode == 141  # 128 + SIGPIPE, like other command-line tools
+    assert "Traceback" not in proc.stderr.decode()
+    assert "Exception ignored" not in proc.stderr.decode()
 
 
 def test_run_and_validate_write_tear_sheets(

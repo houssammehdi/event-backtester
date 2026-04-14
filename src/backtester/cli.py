@@ -521,7 +521,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         "strategies": _cmd_strategies,
     }
     try:
-        return commands[args.command](args)
+        status = commands[args.command](args)
+        # Flush inside the guard: with a small, block-buffered output the write
+        # only reaches a closed pipe here, not in the command itself.
+        sys.stdout.flush()
+        return status
     except BacktesterError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
