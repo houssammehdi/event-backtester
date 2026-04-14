@@ -32,7 +32,7 @@ import itertools
 import math
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Any, Literal
 
 import numpy as np
 import numpy.typing as npt
@@ -67,7 +67,8 @@ def label_spans(n_obs: int, *, lookback: int = 0, horizon: int = 0) -> tuple[Int
 
 def _spans(
     start: npt.ArrayLike, end: npt.ArrayLike | None
-) -> tuple[npt.NDArray[np.generic], npt.NDArray[np.generic]]:
+) -> tuple[npt.NDArray[Any], npt.NDArray[Any]]:
+    # integer positions, floats or datetime64 values: any ordered dtype
     s = np.asarray(start)
     e = s if end is None else np.asarray(end)
     if s.ndim != 1 or s.shape != e.shape:
